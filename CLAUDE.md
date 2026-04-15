@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Go project (`github.com/verygoodsoftwarenotvirus/gopher`). Go 1.26.
+Go project (`github.com/verygoodsoftwarenotvirus/hevy-cli`). Go 1.26.
 
 ## Common Commands
 
@@ -35,11 +35,11 @@ Linting runs in Docker (`golangci/golangci-lint` image). Formatting runs locally
 Import ordering uses `gci` with four sections, separated by blank lines:
 
 1. Standard library
-2. `github.com/verygoodsoftwarenotvirus/gopher` (this module)
+2. `github.com/verygoodsoftwarenotvirus/hevy-cli` (this module)
 3. `github.com/verygoodsoftwarenotvirus` (org-level packages)
 4. Everything else (third-party)
 
-The Makefile `THIS` variable must be the full module path (`github.com/verygoodsoftwarenotvirus/gopher`) because `format_imports.sh` uses `dirname` to derive the org prefix.
+The Makefile `THIS` variable must be the full module path (`github.com/verygoodsoftwarenotvirus/hevy-cli`) because `format_imports.sh` uses `dirname` to derive the org prefix.
 
 ## Testing
 

@@ -1,6 +1,6 @@
-module github.com/verygoodsoftwarenotvirus/gopher
+module github.com/verygoodsoftwarenotvirus/hevy-cli
 
-go 1.26
+go 1.26.1
 
 tool (
 	github.com/4meepo/tagalign/cmd/tagalign
