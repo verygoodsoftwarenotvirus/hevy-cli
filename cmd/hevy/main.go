@@ -60,7 +60,7 @@ Commands:
   workouts lastweek [-n N]   Print workouts from N weeks ago (default 1, 0 = this week)
   workouts count             Print total workout count
   workouts get <id>          Get a single workout
-  routines list              List all routines
+  routines list [--folder=T] List routines, optionally filtered by folder title
   routines get <id>          Get a single routine
   531 init --config=FILE     Set up 5/3/1 program
   531 sync --config=FILE     Update routines for current week
@@ -283,13 +283,7 @@ func cmdRoutines(ctx context.Context, client *hevy.Client, args []string) {
 
 	switch args[0] {
 	case "list":
-		for r, err := range client.ListRoutines(ctx) {
-			if err != nil {
-				slog.Error("listing routines", "error", err)
-				os.Exit(1)
-			}
-			fmt.Printf("%s  %s  (%d exercises)\n", r.ID, r.Title, len(r.Exercises))
-		}
+		cmdRoutinesList(ctx, client, args[1:])
 	case "get":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "Usage: hevy routines get <id>")
@@ -325,6 +319,93 @@ func cmdRoutines(ctx context.Context, client *hevy.Client, args []string) {
 	}
 }
 
+func cmdRoutinesList(ctx context.Context, client *hevy.Client, args []string) {
+	fs := flag.NewFlagSet("routines list", flag.ExitOnError)
+	folderTitle := fs.String("folder", "", "only list routines in the folder with this title")
+	fs.Parse(args)
+
+	var folderID *int
+	if *folderTitle != "" {
+		for f, err := range client.ListRoutineFolders(ctx) {
+			if err != nil {
+				slog.Error("listing folders", "error", err)
+				os.Exit(1)
+			}
+			if f.Title == *folderTitle {
+				id := f.ID
+				folderID = &id
+				break
+			}
+		}
+		if folderID == nil {
+			fmt.Fprintf(os.Stderr, "no folder found with title %q\n", *folderTitle)
+			os.Exit(1)
+		}
+	}
+
+	var matched []hevy.Routine
+	for r, err := range client.ListRoutines(ctx) {
+		if err != nil {
+			slog.Error("listing routines", "error", err)
+			os.Exit(1)
+		}
+		if folderID != nil && (r.FolderID == nil || *r.FolderID != *folderID) {
+			continue
+		}
+		matched = append(matched, r)
+	}
+
+	sort.Slice(matched, func(i, j int) bool {
+		return matched[i].CreatedAt.Before(matched[j].CreatedAt)
+	})
+
+	if *folderTitle == "" {
+		for _, r := range matched {
+			fmt.Printf("%s  %s  (%d exercises)\n", r.ID, r.Title, len(r.Exercises))
+		}
+		return
+	}
+
+	fmt.Printf("Folder: %s\n", *folderTitle)
+	if len(matched) == 0 {
+		fmt.Println("No routines in this folder.")
+		return
+	}
+	fmt.Printf("%d routine(s)\n", len(matched))
+
+	for _, r := range matched {
+		fmt.Printf("\n%s\n", r.Title)
+		if r.Notes != "" {
+			fmt.Printf("  Notes: %s\n", r.Notes)
+		}
+		for _, e := range r.Exercises {
+			fmt.Printf("\n  %s\n", e.Title)
+			if e.Notes != "" {
+				fmt.Printf("    Notes: %s\n", e.Notes)
+			}
+			for _, s := range e.Sets {
+				weight := ""
+				if s.WeightKg != nil {
+					weight = fmt.Sprintf("%.1f kg", *s.WeightKg)
+				}
+				reps := ""
+				if s.Reps != nil {
+					reps = fmt.Sprintf("x%d", *s.Reps)
+				}
+				repRange := ""
+				if s.RepRange != nil {
+					repRange = fmt.Sprintf("x%d-%d", s.RepRange.Start, s.RepRange.End)
+				}
+				rpe := ""
+				if s.RPE != nil {
+					rpe = fmt.Sprintf("  @RPE %.1f", *s.RPE)
+				}
+				fmt.Printf("    [%s] %s %s%s%s\n", s.Type, weight, reps, repRange, rpe)
+			}
+		}
+	}
+}
+
 func cmd531(ctx context.Context, client *hevy.Client, args []string) {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "Usage: hevy 531 <init|sync|advance|status> --config=FILE")
@@ -349,6 +430,7 @@ func cmd531(ctx context.Context, client *hevy.Client, args []string) {
 func cmd531Init(ctx context.Context, client *hevy.Client, args []string) {
 	fs := flag.NewFlagSet("531 init", flag.ExitOnError)
 	configPath := fs.String("config", "531.json", "path to 5/3/1 config file")
+	configOnly := fs.Bool("config-only", false, "write config without creating routines in Hevy")
 	fs.Parse(args)
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -361,43 +443,46 @@ func cmd531Init(ctx context.Context, client *hevy.Client, args []string) {
 	}
 
 	for _, lift := range fivethreeone.AllLifts() {
-		fmt.Printf("\n--- %s ---\n", lift.DisplayName())
-
-		fmt.Printf("Exercise template ID (use 'hevy exercises search' to find): ")
-		scanner.Scan()
-		templateID := strings.TrimSpace(scanner.Text())
-		if templateID == "" {
-			slog.Error("exercise template ID is required", "lift", lift.DisplayName())
-			os.Exit(1)
-		}
-
-		// Verify the template exists
-		tmpl, err := client.GetExerciseTemplate(ctx, templateID)
+		templateID, err := fivethreeone.FindExerciseTemplateID(ctx, client, lift)
 		if err != nil {
-			slog.Error("exercise template not found", "id", templateID, "error", err)
+			slog.Error("finding exercise template", "lift", lift.DisplayName(), "error", err)
 			os.Exit(1)
 		}
-		fmt.Printf("  Found: %s\n", tmpl.Title)
+		bbbTemplateID, err := fivethreeone.FindBBBExerciseTemplateID(ctx, client, lift)
+		if err != nil {
+			slog.Error("finding BBB exercise template", "lift", lift.DisplayName(), "error", err)
+			os.Exit(1)
+		}
+		fmt.Printf("%s — found exercise templates\n", lift.DisplayName())
 
-		fmt.Printf("Training max (kg): ")
+		fmt.Printf("1-rep max for %s (kg): ", lift.DisplayName())
 		scanner.Scan()
-		var tm float64
-		if _, err := fmt.Sscanf(scanner.Text(), "%f", &tm); err != nil {
-			slog.Error("invalid training max", "error", err)
+		var orm float64
+		if _, err := fmt.Sscanf(scanner.Text(), "%f", &orm); err != nil {
+			slog.Error("invalid 1-rep max", "lift", lift.DisplayName(), "error", err)
 			os.Exit(1)
 		}
 
 		cfg.Lifts[lift] = fivethreeone.LiftConfig{
-			TrainingMaxKg:      tm,
-			ExerciseTemplateID: templateID,
+			OneRepMaxKg:           orm,
+			ExerciseTemplateID:    templateID,
+			BBBExerciseTemplateID: bbbTemplateID,
 		}
 	}
 
-	// Create routines in Hevy
-	syncer := fivethreeone.NewSyncer(client, cfg)
-	if err := syncer.SyncRoutines(ctx); err != nil {
-		slog.Error("creating routines", "error", err)
-		os.Exit(1)
+	if !*configOnly {
+		folderID, err := resolve531Folder(ctx, client, scanner)
+		if err != nil {
+			slog.Error("resolving folder", "error", err)
+			os.Exit(1)
+		}
+		cfg.FolderID = &folderID
+
+		syncer := fivethreeone.NewSyncer(client, cfg)
+		if err := syncer.SyncRoutines(ctx); err != nil {
+			slog.Error("creating routines", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	if err := fivethreeone.SaveConfig(*configPath, cfg); err != nil {
@@ -405,8 +490,52 @@ func cmd531Init(ctx context.Context, client *hevy.Client, args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("\n5/3/1 program initialized! Config saved to %s\n", *configPath)
-	fmt.Println("Run 'hevy 531 status --config=" + *configPath + "' to see your program.")
+	if *configOnly {
+		fmt.Printf("\nConfig-only init complete. Config saved to %s — run 'hevy 531 sync' to create routines.\n", *configPath)
+	} else {
+		fmt.Printf("\n5/3/1 program initialized! Config saved to %s\n", *configPath)
+		fmt.Println("Run 'hevy 531 status --config=" + *configPath + "' to see your program.")
+	}
+}
+
+const fiveThreeOneFolderName = "Auto 5/3/1 (2)"
+
+func folderExists(ctx context.Context, client *hevy.Client, id int) (bool, error) {
+	for folder, err := range client.ListRoutineFolders(ctx) {
+		if err != nil {
+			return false, fmt.Errorf("listing folders: %w", err)
+		}
+		if folder.ID == id {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// resolve531Folder finds or creates the "Auto 5/3/1" routine folder. If an existing one is
+// found, the user is prompted to reuse it before proceeding.
+func resolve531Folder(ctx context.Context, client *hevy.Client, scanner *bufio.Scanner) (int, error) {
+	for folder, err := range client.ListRoutineFolders(ctx) {
+		if err != nil {
+			return 0, fmt.Errorf("listing folders: %w", err)
+		}
+		if folder.Title != fiveThreeOneFolderName {
+			continue
+		}
+		fmt.Printf("Folder %q already exists. Reuse it? [y/N]: ", fiveThreeOneFolderName)
+		scanner.Scan()
+		if strings.ToLower(strings.TrimSpace(scanner.Text())) == "y" {
+			fmt.Println("Note: existing routines in the folder will remain — Hevy does not support deletion via API.")
+			return folder.ID, nil
+		}
+		break
+	}
+
+	folder, err := client.CreateRoutineFolder(ctx, &hevy.RoutineFolderRequest{Title: fiveThreeOneFolderName})
+	if err != nil {
+		return 0, fmt.Errorf("creating folder: %w", err)
+	}
+	return folder.ID, nil
 }
 
 func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
@@ -418,6 +547,29 @@ func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
 	if err != nil {
 		slog.Error("loading config", "error", err)
 		os.Exit(1)
+	}
+
+	if cfg.FolderID != nil {
+		exists, err := folderExists(ctx, client, *cfg.FolderID)
+		if err != nil {
+			slog.Error("checking folder", "error", err)
+			os.Exit(1)
+		}
+		if !exists {
+			fmt.Printf("Folder %d from config no longer exists in Hevy; re-resolving.\n", *cfg.FolderID)
+			cfg.FolderID = nil
+			cfg.RoutineIDs = nil
+		}
+	}
+
+	if cfg.FolderID == nil {
+		scanner := bufio.NewScanner(os.Stdin)
+		folderID, err := resolve531Folder(ctx, client, scanner)
+		if err != nil {
+			slog.Error("resolving folder", "error", err)
+			os.Exit(1)
+		}
+		cfg.FolderID = &folderID
 	}
 
 	syncer := fivethreeone.NewSyncer(client, cfg)
@@ -465,10 +617,10 @@ func cmd531Advance(ctx context.Context, client *hevy.Client, args []string) {
 	}
 
 	fmt.Printf("Advanced from cycle %d to cycle %d\n", oldCycle, cfg.CycleNumber)
-	fmt.Println("Updated training maxes:")
+	fmt.Println("Updated 1-rep maxes:")
 	for _, lift := range fivethreeone.AllLifts() {
 		if lc, ok := cfg.Lifts[lift]; ok {
-			fmt.Printf("  %s: %.1f kg\n", lift.DisplayName(), lc.TrainingMaxKg)
+			fmt.Printf("  %s: 1RM %.1f kg (TM %.1f kg)\n", lift.DisplayName(), lc.OneRepMaxKg, lc.TrainingMax())
 		}
 	}
 }
@@ -491,13 +643,13 @@ func cmd531Status(args []string) {
 		if !ok {
 			continue
 		}
-		fmt.Printf("%-16s TM: %.1f kg", lift.DisplayName(), lc.TrainingMaxKg)
+		fmt.Printf("%-16s 1RM: %.1f kg  TM: %.1f kg", lift.DisplayName(), lc.OneRepMaxKg, lc.TrainingMax())
 		if weeks, exists := cfg.RoutineIDs[lift]; exists {
 			fmt.Printf("  (%d routines configured)", len(weeks))
 		}
 		fmt.Println()
 
-		sets := fivethreeone.CalculateRoutineSets(lc.TrainingMaxKg, cfg.WeekNumber, lc.UseLbs)
+		sets := fivethreeone.CalculateRoutineSets(lc.TrainingMax(), cfg.WeekNumber, lc.UseLbs)
 		for _, s := range sets {
 			amrap := ""
 			if s.IsAMRAP {

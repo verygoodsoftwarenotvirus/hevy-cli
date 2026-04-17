@@ -130,14 +130,15 @@ func TMIncrement(lift Lift) float64 {
 // set list. For weeks 1-3: 3 warmup sets + 3 working sets, AMRAP is the 6th (index 5).
 const AMRAPSetIndex = 5
 
-// CalculateNewTM computes a new training max from an AMRAP performance using the
-// Epley estimated-1RM formula, then takes 85% of that as the new TM.
-// The result is never less than the current training max.
-func CalculateNewTM(currentTMKg, amrapWeightKg float64, amrapReps int) float64 {
-	estimated1RM := amrapWeightKg * (1 + float64(amrapReps)/30.0)
-	newTM := RoundWeight(estimated1RM * 0.85)
-	if newTM < currentTMKg {
-		return currentTMKg
+// CalculateNewOneRepMax estimates a new 1-rep max from an AMRAP performance
+// using the Epley formula. The result is never less than the current 1RM.
+//
+// The conservative shave lives in TrainingMax() (TM = 90% × 1RM); this
+// function returns the estimated 1RM itself.
+func CalculateNewOneRepMax(currentOneRMKg, amrapWeightKg float64, amrapReps int) float64 {
+	estimated1RM := RoundWeight(amrapWeightKg * (1 + float64(amrapReps)/30.0))
+	if estimated1RM < currentOneRMKg {
+		return currentOneRMKg
 	}
-	return newTM
+	return estimated1RM
 }

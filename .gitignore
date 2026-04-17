@@ -38,3 +38,6 @@ vendor
 artifacts/
 
 TODO.md
+
+hevy
+config.json

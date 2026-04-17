@@ -61,7 +61,7 @@ func (l Lift) HevyBBBTitle() string {
 func (l Lift) HevyTitle() string {
 	switch l {
 	case Squat:
-		return "Low Bar Squat"
+		return "High Bar Squat"
 	case BenchPress:
 		return "Bench Press (Barbell)"
 	case OverheadPress:
@@ -78,12 +78,36 @@ func (l Lift) IsUpperBody() bool {
 	return l == BenchPress || l == OverheadPress
 }
 
-// LiftConfig holds the training max and exercise template IDs for one lift.
+// AuxiliaryExercise describes a user-supplied accessory movement appended to a lift's
+// routine on every week (including deload). Either Reps or DurationSeconds should be set.
+// Weight and rest are optional.
+type AuxiliaryExercise struct {
+	Name               string   `json:"name,omitempty"`
+	ExerciseTemplateID string   `json:"exercise_template_id"`
+	Sets               int      `json:"sets"`
+	Reps               int      `json:"reps,omitempty"`
+	DurationSeconds    *int     `json:"duration_seconds,omitempty"`
+	WeightKg           *float64 `json:"weight_kg,omitempty"`
+	RestSeconds        *int     `json:"rest_seconds,omitempty"`
+}
+
+// LiftConfig holds the 1-rep max and exercise template IDs for one lift.
 type LiftConfig struct {
-	TrainingMaxKg         float64 `json:"training_max_kg"`
-	ExerciseTemplateID    string  `json:"exercise_template_id"`
-	BBBExerciseTemplateID string  `json:"bbb_exercise_template_id"`
-	UseLbs                bool    `json:"use_lbs,omitempty"`
+	OneRepMaxKg           float64             `json:"one_rep_max_kg"`
+	ExerciseTemplateID    string              `json:"exercise_template_id"`
+	BBBExerciseTemplateID string              `json:"bbb_exercise_template_id"`
+	AuxiliaryExercises    []AuxiliaryExercise `json:"auxiliary_exercises,omitempty"`
+	UseLbs                bool                `json:"use_lbs,omitempty"`
+}
+
+// TrainingMax returns the training max (TM) in kg: 90% of the stored 1-rep max.
+//
+// In Jim Wendler's 5/3/1, the TM is defined as 90% of the true 1RM, and every
+// working-set, warmup, and BBB assistance percentage is applied to the TM —
+// never to the 1RM directly. For example, a "65%" Week 1 set is
+// 65% of TM = 65% × (90% × 1RM) = 58.5% of 1RM.
+func (c LiftConfig) TrainingMax() float64 {
+	return c.OneRepMaxKg * 0.9
 }
 
 // Config holds the complete 5/3/1 program state.
@@ -93,6 +117,8 @@ type Config struct {
 	WeekNumber  int                     `json:"week_number"`
 	RoutineIDs  map[Lift]map[int]string `json:"routine_ids,omitempty"`
 	FolderID    *int                    `json:"folder_id,omitempty"`
+	Warmup      []AuxiliaryExercise     `json:"warmup,omitempty"`
+	Cooldown    []AuxiliaryExercise     `json:"cooldown,omitempty"`
 }
 
 // LoadConfig reads a Config from a JSON file.

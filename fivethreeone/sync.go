@@ -37,18 +37,22 @@ func (s *Syncer) SyncRoutines(ctx context.Context) error {
 				updateReq := *req
 				updateReq.FolderID = nil
 				_, err := s.client.UpdateRoutine(ctx, routineID, &updateReq)
-				if err != nil {
+				if err == nil {
+					fmt.Printf("Updated routine for %s — %s\n", lift.DisplayName(), WeekName(week))
+					continue
+				}
+				if !hevy.IsNotFound(err) {
 					return fmt.Errorf("updating routine for %s week %d: %w", lift.DisplayName(), week, err)
 				}
-				fmt.Printf("Updated routine for %s — %s\n", lift.DisplayName(), WeekName(week))
-			} else {
-				routine, err := s.client.CreateRoutine(ctx, req)
-				if err != nil {
-					return fmt.Errorf("creating routine for %s week %d: %w", lift.DisplayName(), week, err)
-				}
-				s.config.RoutineIDs[lift][week] = routine.ID
-				fmt.Printf("Created routine for %s — %s (ID: %s)\n", lift.DisplayName(), WeekName(week), routine.ID)
+				fmt.Printf("Routine %s for %s — %s missing in Hevy; recreating\n", routineID, lift.DisplayName(), WeekName(week))
+				delete(s.config.RoutineIDs[lift], week)
 			}
+			routine, err := s.client.CreateRoutine(ctx, req)
+			if err != nil {
+				return fmt.Errorf("creating routine for %s week %d: %w", lift.DisplayName(), week, err)
+			}
+			s.config.RoutineIDs[lift][week] = routine.ID
+			fmt.Printf("Created routine for %s — %s (ID: %s)\n", lift.DisplayName(), WeekName(week), routine.ID)
 		}
 	}
 	return nil
@@ -111,12 +115,12 @@ func (s *Syncer) AdvanceCycle(ctx context.Context) error {
 			continue
 		}
 
-		oldTM := liftCfg.TrainingMaxKg
-		newTM := CalculateNewTM(oldTM, *amrapSet.WeightKg, *amrapSet.Reps)
-		liftCfg.TrainingMaxKg = newTM
+		oldOneRM := liftCfg.OneRepMaxKg
+		newOneRM := CalculateNewOneRepMax(oldOneRM, *amrapSet.WeightKg, *amrapSet.Reps)
+		liftCfg.OneRepMaxKg = newOneRM
 		s.config.Lifts[lift] = liftCfg
-		fmt.Printf("%s: TM %.1f kg → %.1f kg (AMRAP: %.1f kg × %d reps)\n",
-			lift.DisplayName(), oldTM, newTM, *amrapSet.WeightKg, *amrapSet.Reps)
+		fmt.Printf("%s: 1RM %.1f kg → %.1f kg (TM %.1f kg → %.1f kg, AMRAP: %.1f kg × %d reps)\n",
+			lift.DisplayName(), oldOneRM, newOneRM, oldOneRM*0.9, newOneRM*0.9, *amrapSet.WeightKg, *amrapSet.Reps)
 	}
 
 	s.config.CycleNumber++
@@ -128,32 +132,37 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 	weekName := WeekName(week)
 	title := fmt.Sprintf("%s -- %s", weekName, lift.DisplayName())
 
-	sets := CalculateRoutineSets(liftCfg.TrainingMaxKg, week, liftCfg.UseLbs)
+	sets := CalculateRoutineSets(liftCfg.TrainingMax(), week, liftCfg.UseLbs)
 
 	var routineSets []hevy.RoutineSetRequest
 	for _, cs := range sets {
 		weight := cs.WeightKg
-		rs := hevy.RoutineSetRequest{
+		// Hevy treats rep_range as an exercise-level mode: if any set in an exercise
+		// uses rep_range, the plain reps field is ignored on every other set. Since
+		// the AMRAP set needs a range, encode all working sets as ranges (fixed-rep
+		// sets collapse to start == end).
+		repRange := &hevy.RepRange{Start: cs.Reps, End: cs.Reps}
+		if cs.IsAMRAP {
+			repRange.End = 20
+		}
+		routineSets = append(routineSets, hevy.RoutineSetRequest{
 			Type:     cs.Type,
 			WeightKg: &weight,
-		}
-		if cs.IsAMRAP {
-			rs.RepRange = &hevy.RepRange{Start: cs.Reps, End: 20}
-		} else {
-			reps := cs.Reps
-			rs.Reps = &reps
-		}
-		routineSets = append(routineSets, rs)
+			RepRange: repRange,
+		})
+	}
+
+	var exercises []hevy.RoutineExerciseRequest
+	for _, w := range s.config.Warmup {
+		exercises = append(exercises, auxToExerciseRequest(w))
 	}
 
 	mainRestSeconds := 150
-	exercises := []hevy.RoutineExerciseRequest{
-		{
-			ExerciseTemplateID: liftCfg.ExerciseTemplateID,
-			RestSeconds:        &mainRestSeconds,
-			Sets:               routineSets,
-		},
-	}
+	exercises = append(exercises, hevy.RoutineExerciseRequest{
+		ExerciseTemplateID: liftCfg.ExerciseTemplateID,
+		RestSeconds:        &mainRestSeconds,
+		Sets:               routineSets,
+	})
 
 	// BBB assistance: 5×10 at 50% TM, skipped on deload week.
 	if week != 4 && liftCfg.BBBExerciseTemplateID != "" {
@@ -161,8 +170,8 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 		if liftCfg.UseLbs {
 			round = RoundWeightLbs
 		}
-		bbbWeight := round(liftCfg.TrainingMaxKg * 0.50)
-		bbbRestSeconds := 35
+		bbbWeight := round(liftCfg.TrainingMax() * 0.50)
+		bbbRestSeconds := 60
 		var bbbSets []hevy.RoutineSetRequest
 		for range 5 {
 			w := bbbWeight
@@ -180,10 +189,42 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 		})
 	}
 
+	for _, aux := range liftCfg.AuxiliaryExercises {
+		exercises = append(exercises, auxToExerciseRequest(aux))
+	}
+
+	for _, c := range s.config.Cooldown {
+		exercises = append(exercises, auxToExerciseRequest(c))
+	}
+
 	return &hevy.RoutineRequest{
-		Title:    title,
-		FolderID: s.config.FolderID,
-		Notes:    fmt.Sprintf("5/3/1 Cycle %d, %s", s.config.CycleNumber, weekName),
+		Title:     title,
+		FolderID:  s.config.FolderID,
+		Notes:     fmt.Sprintf("5/3/1 Cycle %d, %s", s.config.CycleNumber, weekName),
 		Exercises: exercises,
+	}
+}
+
+func auxToExerciseRequest(aux AuxiliaryExercise) hevy.RoutineExerciseRequest {
+	auxSets := make([]hevy.RoutineSetRequest, 0, aux.Sets)
+	for range aux.Sets {
+		rs := hevy.RoutineSetRequest{Type: hevy.SetTypeNormal}
+		if aux.DurationSeconds != nil {
+			d := *aux.DurationSeconds
+			rs.DurationSeconds = &d
+		} else {
+			reps := aux.Reps
+			rs.Reps = &reps
+		}
+		if aux.WeightKg != nil {
+			w := *aux.WeightKg
+			rs.WeightKg = &w
+		}
+		auxSets = append(auxSets, rs)
+	}
+	return hevy.RoutineExerciseRequest{
+		ExerciseTemplateID: aux.ExerciseTemplateID,
+		RestSeconds:        aux.RestSeconds,
+		Sets:               auxSets,
 	}
 }
