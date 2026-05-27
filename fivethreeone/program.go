@@ -117,28 +117,4 @@ func CalculateRoutineSets(trainingMaxKg float64, week int, useLbs bool) []Calcul
 	return sets
 }
 
-// TMIncrement returns the training max increase after a cycle completes.
-// Upper body: +2.5 kg, lower body: +5.0 kg.
-func TMIncrement(lift Lift) float64 {
-	if lift.IsUpperBody() {
-		return 2.5
-	}
-	return 5.0
-}
 
-// AMRAPSetIndex returns the 0-based index of the AMRAP set within a workout exercise's
-// set list. For weeks 1-3: 3 warmup sets + 3 working sets, AMRAP is the 6th (index 5).
-const AMRAPSetIndex = 5
-
-// CalculateNewOneRepMax estimates a new 1-rep max from an AMRAP performance
-// using the Epley formula. The result is never less than the current 1RM.
-//
-// The conservative shave lives in TrainingMax() (TM = 90% × 1RM); this
-// function returns the estimated 1RM itself.
-func CalculateNewOneRepMax(currentOneRMKg, amrapWeightKg float64, amrapReps int) float64 {
-	estimated1RM := RoundWeight(amrapWeightKg * (1 + float64(amrapReps)/30.0))
-	if estimated1RM < currentOneRMKg {
-		return currentOneRMKg
-	}
-	return estimated1RM
-}

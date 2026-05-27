@@ -58,79 +58,10 @@ func (s *Syncer) SyncRoutines(ctx context.Context) error {
 	return nil
 }
 
-// latestWorkoutsByRoutine fetches all workouts and returns a map of routine ID → most recent workout.
-func (s *Syncer) latestWorkoutsByRoutine(ctx context.Context) (map[string]*hevy.Workout, error) {
-	workouts, err := hevy.Collect(s.client.ListWorkouts(ctx))
-	if err != nil {
-		return nil, fmt.Errorf("listing workouts: %w", err)
-	}
-	latest := make(map[string]*hevy.Workout)
-	for i := range workouts {
-		w := &workouts[i]
-		if w.RoutineID == nil {
-			continue
-		}
-		rid := *w.RoutineID
-		if prev, ok := latest[rid]; !ok || w.StartTime.After(prev.StartTime) {
-			latest[rid] = w
-		}
-	}
-	return latest, nil
-}
-
-// AdvanceCycle reads the latest week-3 workout for each lift, computes new training maxes
-// via AMRAP performance, increments the cycle number, and updates the config in place.
-func (s *Syncer) AdvanceCycle(ctx context.Context) error {
-	byRoutine, err := s.latestWorkoutsByRoutine(ctx)
-	if err != nil {
-		return err
-	}
-
-	for _, lift := range AllLifts() {
-		liftCfg, ok := s.config.Lifts[lift]
-		if !ok {
-			continue
-		}
-
-		week3ID, ok := s.config.RoutineIDs[lift][3]
-		if !ok {
-			fmt.Printf("%s: no week-3 routine ID configured, skipping\n", lift.DisplayName())
-			continue
-		}
-
-		workout, ok := byRoutine[week3ID]
-		if !ok {
-			fmt.Printf("%s: no completed week-3 workout found, skipping\n", lift.DisplayName())
-			continue
-		}
-
-		if len(workout.Exercises) == 0 || len(workout.Exercises[0].Sets) <= AMRAPSetIndex {
-			fmt.Printf("%s: week-3 workout missing AMRAP set, skipping\n", lift.DisplayName())
-			continue
-		}
-
-		amrapSet := workout.Exercises[0].Sets[AMRAPSetIndex]
-		if amrapSet.WeightKg == nil || amrapSet.Reps == nil {
-			fmt.Printf("%s: AMRAP set missing weight or reps, skipping\n", lift.DisplayName())
-			continue
-		}
-
-		oldOneRM := liftCfg.OneRepMaxKg
-		newOneRM := CalculateNewOneRepMax(oldOneRM, *amrapSet.WeightKg, *amrapSet.Reps)
-		liftCfg.OneRepMaxKg = newOneRM
-		s.config.Lifts[lift] = liftCfg
-		fmt.Printf("%s: 1RM %.1f kg → %.1f kg (TM %.1f kg → %.1f kg, AMRAP: %.1f kg × %d reps)\n",
-			lift.DisplayName(), oldOneRM, newOneRM, oldOneRM*0.9, newOneRM*0.9, *amrapSet.WeightKg, *amrapSet.Reps)
-	}
-
-	s.config.CycleNumber++
-	fmt.Printf("Advanced to cycle %d\n", s.config.CycleNumber)
-	return nil
-}
 
 func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *hevy.RoutineRequest {
 	weekName := WeekName(week)
-	title := fmt.Sprintf("%s -- %s", weekName, lift.DisplayName())
+	title := fmt.Sprintf("C%dW%d -- %s", s.config.CycleNumber, week, lift.DisplayName())
 
 	sets := CalculateRoutineSets(liftCfg.TrainingMax(), week, liftCfg.UseLbs)
 
@@ -153,7 +84,11 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 	}
 
 	var exercises []hevy.RoutineExerciseRequest
-	for _, w := range s.config.Warmup {
+	warmupExercises := liftCfg.Warmup
+	if len(warmupExercises) == 0 {
+		warmupExercises = s.config.Warmup
+	}
+	for _, w := range warmupExercises {
 		exercises = append(exercises, auxToExerciseRequest(w))
 	}
 
@@ -193,7 +128,7 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 		exercises = append(exercises, auxToExerciseRequest(aux))
 	}
 
-	for _, c := range s.config.Cooldown {
+	for _, c := range liftCfg.Cooldown {
 		exercises = append(exercises, auxToExerciseRequest(c))
 	}
 
@@ -204,6 +139,8 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 		Exercises: exercises,
 	}
 }
+
+const defaultAuxRestSeconds = 120
 
 func auxToExerciseRequest(aux AuxiliaryExercise) hevy.RoutineExerciseRequest {
 	auxSets := make([]hevy.RoutineSetRequest, 0, aux.Sets)
@@ -222,9 +159,13 @@ func auxToExerciseRequest(aux AuxiliaryExercise) hevy.RoutineExerciseRequest {
 		}
 		auxSets = append(auxSets, rs)
 	}
+	restSeconds := defaultAuxRestSeconds
+	if aux.RestSeconds != nil {
+		restSeconds = *aux.RestSeconds
+	}
 	return hevy.RoutineExerciseRequest{
 		ExerciseTemplateID: aux.ExerciseTemplateID,
-		RestSeconds:        aux.RestSeconds,
+		RestSeconds:        &restSeconds,
 		Sets:               auxSets,
 	}
 }

@@ -408,7 +408,7 @@ func cmdRoutinesList(ctx context.Context, client *hevy.Client, args []string) {
 
 func cmd531(ctx context.Context, client *hevy.Client, args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: hevy 531 <init|sync|advance|status> --config=FILE")
+		fmt.Fprintln(os.Stderr, "Usage: hevy 531 <init|sync|status|fix-exercises> --config=FILE")
 		os.Exit(1)
 	}
 
@@ -417,10 +417,10 @@ func cmd531(ctx context.Context, client *hevy.Client, args []string) {
 		cmd531Init(ctx, client, args[1:])
 	case "sync":
 		cmd531Sync(ctx, client, args[1:])
-	case "advance":
-		cmd531Advance(ctx, client, args[1:])
 	case "status":
 		cmd531Status(args[1:])
+	case "fix-exercises":
+		cmd531FixExercises(ctx, client, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown 531 command: %s\n", args[0])
 		os.Exit(1)
@@ -471,9 +471,9 @@ func cmd531Init(ctx context.Context, client *hevy.Client, args []string) {
 	}
 
 	if !*configOnly {
-		folderID, err := resolve531Folder(ctx, client, scanner)
+		folderID, err := create531Folder(ctx, client, cfg.CycleNumber)
 		if err != nil {
-			slog.Error("resolving folder", "error", err)
+			slog.Error("creating folder", "error", err)
 			os.Exit(1)
 		}
 		cfg.FolderID = &folderID
@@ -498,40 +498,9 @@ func cmd531Init(ctx context.Context, client *hevy.Client, args []string) {
 	}
 }
 
-const fiveThreeOneFolderName = "Auto 5/3/1 (2)"
-
-func folderExists(ctx context.Context, client *hevy.Client, id int) (bool, error) {
-	for folder, err := range client.ListRoutineFolders(ctx) {
-		if err != nil {
-			return false, fmt.Errorf("listing folders: %w", err)
-		}
-		if folder.ID == id {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// resolve531Folder finds or creates the "Auto 5/3/1" routine folder. If an existing one is
-// found, the user is prompted to reuse it before proceeding.
-func resolve531Folder(ctx context.Context, client *hevy.Client, scanner *bufio.Scanner) (int, error) {
-	for folder, err := range client.ListRoutineFolders(ctx) {
-		if err != nil {
-			return 0, fmt.Errorf("listing folders: %w", err)
-		}
-		if folder.Title != fiveThreeOneFolderName {
-			continue
-		}
-		fmt.Printf("Folder %q already exists. Reuse it? [y/N]: ", fiveThreeOneFolderName)
-		scanner.Scan()
-		if strings.ToLower(strings.TrimSpace(scanner.Text())) == "y" {
-			fmt.Println("Note: existing routines in the folder will remain — Hevy does not support deletion via API.")
-			return folder.ID, nil
-		}
-		break
-	}
-
-	folder, err := client.CreateRoutineFolder(ctx, &hevy.RoutineFolderRequest{Title: fiveThreeOneFolderName})
+func create531Folder(ctx context.Context, client *hevy.Client, cycleNumber int) (int, error) {
+	title := fmt.Sprintf("5/3/1 (Cycle %d)", cycleNumber)
+	folder, err := client.CreateRoutineFolder(ctx, &hevy.RoutineFolderRequest{Title: title})
 	if err != nil {
 		return 0, fmt.Errorf("creating folder: %w", err)
 	}
@@ -541,6 +510,7 @@ func resolve531Folder(ctx context.Context, client *hevy.Client, scanner *bufio.S
 func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
 	fs := flag.NewFlagSet("531 sync", flag.ExitOnError)
 	configPath := fs.String("config", "531.json", "path to 5/3/1 config file")
+	nextCycle := fs.Bool("next-cycle", false, "increment cycle number and create fresh routines (update training maxes in the config first)")
 	fs.Parse(args)
 
 	cfg, err := fivethreeone.LoadConfig(*configPath)
@@ -549,27 +519,16 @@ func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
 		os.Exit(1)
 	}
 
-	if cfg.FolderID != nil {
-		exists, err := folderExists(ctx, client, *cfg.FolderID)
+	if *nextCycle {
+		cfg.CycleNumber++
+		cfg.RoutineIDs = nil
+		folderID, err := create531Folder(ctx, client, cfg.CycleNumber)
 		if err != nil {
-			slog.Error("checking folder", "error", err)
-			os.Exit(1)
-		}
-		if !exists {
-			fmt.Printf("Folder %d from config no longer exists in Hevy; re-resolving.\n", *cfg.FolderID)
-			cfg.FolderID = nil
-			cfg.RoutineIDs = nil
-		}
-	}
-
-	if cfg.FolderID == nil {
-		scanner := bufio.NewScanner(os.Stdin)
-		folderID, err := resolve531Folder(ctx, client, scanner)
-		if err != nil {
-			slog.Error("resolving folder", "error", err)
+			slog.Error("creating folder", "error", err)
 			os.Exit(1)
 		}
 		cfg.FolderID = &folderID
+		fmt.Printf("Advancing to cycle %d — created folder \"5/3/1 (Cycle %d)\".\n", cfg.CycleNumber, cfg.CycleNumber)
 	}
 
 	syncer := fivethreeone.NewSyncer(client, cfg)
@@ -586,8 +545,8 @@ func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
 	fmt.Printf("Routines synced for Cycle %d, %s\n", cfg.CycleNumber, fivethreeone.WeekName(cfg.WeekNumber))
 }
 
-func cmd531Advance(ctx context.Context, client *hevy.Client, args []string) {
-	fs := flag.NewFlagSet("531 advance", flag.ExitOnError)
+func cmd531FixExercises(ctx context.Context, client *hevy.Client, args []string) {
+	fs := flag.NewFlagSet("531 fix-exercises", flag.ExitOnError)
 	configPath := fs.String("config", "531.json", "path to 5/3/1 config file")
 	fs.Parse(args)
 
@@ -597,17 +556,8 @@ func cmd531Advance(ctx context.Context, client *hevy.Client, args []string) {
 		os.Exit(1)
 	}
 
-	oldCycle := cfg.CycleNumber
-
-	syncer := fivethreeone.NewSyncer(client, cfg)
-	if err := syncer.AdvanceCycle(ctx); err != nil {
-		slog.Error("advancing cycle", "error", err)
-		os.Exit(1)
-	}
-
-	// Sync routines with updated training maxes
-	if err := syncer.SyncRoutines(ctx); err != nil {
-		slog.Error("syncing routines", "error", err)
+	if err := fivethreeone.RefreshExerciseTemplateIDs(ctx, client, cfg); err != nil {
+		slog.Error("refreshing exercise template IDs", "error", err)
 		os.Exit(1)
 	}
 
@@ -616,13 +566,7 @@ func cmd531Advance(ctx context.Context, client *hevy.Client, args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Advanced from cycle %d to cycle %d\n", oldCycle, cfg.CycleNumber)
-	fmt.Println("Updated 1-rep maxes:")
-	for _, lift := range fivethreeone.AllLifts() {
-		if lc, ok := cfg.Lifts[lift]; ok {
-			fmt.Printf("  %s: 1RM %.1f kg (TM %.1f kg)\n", lift.DisplayName(), lc.OneRepMaxKg, lc.TrainingMax())
-		}
-	}
+	fmt.Printf("Exercise template IDs refreshed and saved to %s\n", *configPath)
 }
 
 func cmd531Status(args []string) {

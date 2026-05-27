@@ -96,7 +96,9 @@ type LiftConfig struct {
 	OneRepMaxKg           float64             `json:"one_rep_max_kg"`
 	ExerciseTemplateID    string              `json:"exercise_template_id"`
 	BBBExerciseTemplateID string              `json:"bbb_exercise_template_id"`
+	Warmup                []AuxiliaryExercise `json:"warmup,omitempty"`
 	AuxiliaryExercises    []AuxiliaryExercise `json:"auxiliary_exercises,omitempty"`
+	Cooldown              []AuxiliaryExercise `json:"cooldown,omitempty"`
 	UseLbs                bool                `json:"use_lbs,omitempty"`
 }
 
@@ -118,7 +120,6 @@ type Config struct {
 	RoutineIDs  map[Lift]map[int]string `json:"routine_ids,omitempty"`
 	FolderID    *int                    `json:"folder_id,omitempty"`
 	Warmup      []AuxiliaryExercise     `json:"warmup,omitempty"`
-	Cooldown    []AuxiliaryExercise     `json:"cooldown,omitempty"`
 }
 
 // LoadConfig reads a Config from a JSON file.
@@ -157,6 +158,83 @@ func FindExerciseTemplateID(ctx context.Context, client *hevy.Client, lift Lift)
 // FindBBBExerciseTemplateID searches for the BBB assistance exercise template.
 func FindBBBExerciseTemplateID(ctx context.Context, client *hevy.Client, lift Lift) (string, error) {
 	return findTemplateByTitle(ctx, client, lift.HevyBBBTitle())
+}
+
+// RefreshExerciseTemplateIDs re-resolves exercise template IDs in the config from the
+// Hevy API. It re-resolves BBB assistance IDs (which have known canonical titles) and
+// any auxiliary/warmup/cooldown exercises that have a Name field set.
+//
+// Main lift IDs are intentionally left alone — they were chosen interactively at init
+// time and may not match the hardcoded canonical titles. If a main lift ID has gone
+// stale, re-run 'hevy 531 init' to reset the config.
+func RefreshExerciseTemplateIDs(ctx context.Context, client *hevy.Client, cfg *Config) error {
+	for _, lift := range AllLifts() {
+		liftCfg, ok := cfg.Lifts[lift]
+		if !ok {
+			continue
+		}
+
+		if liftCfg.BBBExerciseTemplateID != "" {
+			bbbID, err := FindBBBExerciseTemplateID(ctx, client, lift)
+			if err != nil {
+				return fmt.Errorf("finding BBB exercise template for %s: %w", lift.DisplayName(), err)
+			}
+			liftCfg.BBBExerciseTemplateID = bbbID
+			fmt.Printf("%s BBB: exercise template ID → %s\n", lift.DisplayName(), bbbID)
+		}
+
+		for i, aux := range liftCfg.Warmup {
+			if aux.Name == "" {
+				continue
+			}
+			id, err := findTemplateByTitle(ctx, client, aux.Name)
+			if err != nil {
+				return fmt.Errorf("finding warmup template %q for %s: %w", aux.Name, lift.DisplayName(), err)
+			}
+			liftCfg.Warmup[i].ExerciseTemplateID = id
+			fmt.Printf("%s warmup %q: exercise template ID → %s\n", lift.DisplayName(), aux.Name, id)
+		}
+
+		for i, aux := range liftCfg.AuxiliaryExercises {
+			if aux.Name == "" {
+				continue
+			}
+			id, err := findTemplateByTitle(ctx, client, aux.Name)
+			if err != nil {
+				return fmt.Errorf("finding auxiliary template %q for %s: %w", aux.Name, lift.DisplayName(), err)
+			}
+			liftCfg.AuxiliaryExercises[i].ExerciseTemplateID = id
+			fmt.Printf("%s auxiliary %q: exercise template ID → %s\n", lift.DisplayName(), aux.Name, id)
+		}
+
+		for i, c := range liftCfg.Cooldown {
+			if c.Name == "" {
+				continue
+			}
+			id, err := findTemplateByTitle(ctx, client, c.Name)
+			if err != nil {
+				return fmt.Errorf("finding cooldown template %q for %s: %w", c.Name, lift.DisplayName(), err)
+			}
+			liftCfg.Cooldown[i].ExerciseTemplateID = id
+			fmt.Printf("%s cooldown %q: exercise template ID → %s\n", lift.DisplayName(), c.Name, id)
+		}
+
+		cfg.Lifts[lift] = liftCfg
+	}
+
+	for i, w := range cfg.Warmup {
+		if w.Name == "" {
+			continue
+		}
+		id, err := findTemplateByTitle(ctx, client, w.Name)
+		if err != nil {
+			return fmt.Errorf("finding global warmup template %q: %w", w.Name, err)
+		}
+		cfg.Warmup[i].ExerciseTemplateID = id
+		fmt.Printf("global warmup %q: exercise template ID → %s\n", w.Name, id)
+	}
+
+	return nil
 }
 
 // SaveConfig writes a Config to a JSON file.
