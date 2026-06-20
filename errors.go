@@ -9,9 +9,9 @@ import (
 
 // APIError represents a non-2xx response from the Hevy API.
 type APIError struct {
-	StatusCode int
 	Status     string
 	Body       string
+	StatusCode int
 }
 
 func (e *APIError) Error() string {

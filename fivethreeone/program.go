@@ -9,10 +9,10 @@ import (
 
 // PrescribedSet describes a single prescribed set in the 5/3/1 scheme.
 type PrescribedSet struct {
+	Type       hevy.SetType
 	Percentage float64
 	Reps       int
 	IsAMRAP    bool
-	Type       hevy.SetType
 }
 
 // WeekScheme describes the working sets for one week of 5/3/1.
@@ -73,10 +73,10 @@ func RoundWeightLbs(kg float64) float64 {
 
 // CalculatedSet represents a fully computed set with weight and reps.
 type CalculatedSet struct {
+	Type     hevy.SetType
 	WeightKg float64
 	Reps     int
 	IsAMRAP  bool
-	Type     hevy.SetType
 }
 
 // CalculateRoutineSets computes the set list (warmups + working sets) for a given TM and week.
@@ -116,5 +116,3 @@ func CalculateRoutineSets(trainingMaxKg float64, week int, useLbs bool) []Calcul
 
 	return sets
 }
-
-

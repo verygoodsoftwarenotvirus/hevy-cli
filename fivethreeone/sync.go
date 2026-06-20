@@ -58,12 +58,11 @@ func (s *Syncer) SyncRoutines(ctx context.Context) error {
 	return nil
 }
 
-
 func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *hevy.RoutineRequest {
 	weekName := WeekName(week)
 	title := fmt.Sprintf("C%dW%d -- %s", s.config.CycleNumber, week, lift.DisplayName())
 
-	sets := CalculateRoutineSets(liftCfg.TrainingMax(), week, liftCfg.UseLbs)
+	sets := CalculateRoutineSets(liftCfg.TrainingMaxKg, week, liftCfg.UseLbs)
 
 	var routineSets []hevy.RoutineSetRequest
 	for _, cs := range sets {
@@ -105,7 +104,7 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 		if liftCfg.UseLbs {
 			round = RoundWeightLbs
 		}
-		bbbWeight := round(liftCfg.TrainingMax() * 0.50)
+		bbbWeight := round(liftCfg.TrainingMaxKg * 0.50)
 		bbbRestSeconds := 60
 		var bbbSets []hevy.RoutineSetRequest
 		for range 5 {

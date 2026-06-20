@@ -20,6 +20,19 @@ My template repo for Go projects.
 6. Update `CLAUDE.md` with project-specific details
 7. Run `make setup`
 
+## 5/3/1
+
+Each lift in the config stores a **training max** (`training_max_kg`); all working-set,
+warmup, and BBB weights are derived from it. The two commands you'll run regularly:
+
+```bash
+hevy 531 sync               # (re)create all 16 routines (4 lifts × 4 weeks) at the current training maxes
+hevy 531 sync --next-cycle  # advance a cycle: bump training maxes (upper +2.5kg, lower +5kg), then recreate routines in a fresh folder
+```
+
+Typical loop: train the 4-week block (deleting routines as you finish them), then run
+`hevy 531 sync --next-cycle` to get a fresh block with heavier weights.
+
 ## Development
 
 ```bash

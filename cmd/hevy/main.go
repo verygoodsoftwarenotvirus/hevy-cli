@@ -438,7 +438,6 @@ func cmd531Init(ctx context.Context, client *hevy.Client, args []string) {
 	cfg := &fivethreeone.Config{
 		Lifts:       make(map[fivethreeone.Lift]fivethreeone.LiftConfig),
 		CycleNumber: 1,
-		WeekNumber:  1,
 		RoutineIDs:  make(map[fivethreeone.Lift]map[int]string),
 	}
 
@@ -455,16 +454,16 @@ func cmd531Init(ctx context.Context, client *hevy.Client, args []string) {
 		}
 		fmt.Printf("%s — found exercise templates\n", lift.DisplayName())
 
-		fmt.Printf("1-rep max for %s (kg): ", lift.DisplayName())
+		fmt.Printf("training max for %s (kg): ", lift.DisplayName())
 		scanner.Scan()
-		var orm float64
-		if _, err := fmt.Sscanf(scanner.Text(), "%f", &orm); err != nil {
-			slog.Error("invalid 1-rep max", "lift", lift.DisplayName(), "error", err)
+		var tm float64
+		if _, err := fmt.Sscanf(scanner.Text(), "%f", &tm); err != nil {
+			slog.Error("invalid training max", "lift", lift.DisplayName(), "error", err)
 			os.Exit(1)
 		}
 
 		cfg.Lifts[lift] = fivethreeone.LiftConfig{
-			OneRepMaxKg:           orm,
+			TrainingMaxKg:         tm,
 			ExerciseTemplateID:    templateID,
 			BBBExerciseTemplateID: bbbTemplateID,
 		}
@@ -510,7 +509,7 @@ func create531Folder(ctx context.Context, client *hevy.Client, cycleNumber int) 
 func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
 	fs := flag.NewFlagSet("531 sync", flag.ExitOnError)
 	configPath := fs.String("config", "531.json", "path to 5/3/1 config file")
-	nextCycle := fs.Bool("next-cycle", false, "increment cycle number and create fresh routines (update training maxes in the config first)")
+	nextCycle := fs.Bool("next-cycle", false, "advance to the next cycle: bump training maxes (upper +2.5kg, lower +5kg) and create fresh routines")
 	fs.Parse(args)
 
 	cfg, err := fivethreeone.LoadConfig(*configPath)
@@ -520,6 +519,11 @@ func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
 	}
 
 	if *nextCycle {
+		for lift, lc := range cfg.Lifts {
+			lc.TrainingMaxKg += lift.TMIncrementKg()
+			cfg.Lifts[lift] = lc
+			fmt.Printf("%s — training max now %.1f kg (+%.1f)\n", lift.DisplayName(), lc.TrainingMaxKg, lift.TMIncrementKg())
+		}
 		cfg.CycleNumber++
 		cfg.RoutineIDs = nil
 		folderID, err := create531Folder(ctx, client, cfg.CycleNumber)
@@ -542,7 +546,7 @@ func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Routines synced for Cycle %d, %s\n", cfg.CycleNumber, fivethreeone.WeekName(cfg.WeekNumber))
+	fmt.Printf("Routines synced for Cycle %d\n", cfg.CycleNumber)
 }
 
 func cmd531FixExercises(ctx context.Context, client *hevy.Client, args []string) {
@@ -580,26 +584,29 @@ func cmd531Status(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Cycle:  %d\nWeek:   %d (%s)\n\n", cfg.CycleNumber, cfg.WeekNumber, fivethreeone.WeekName(cfg.WeekNumber))
+	fmt.Printf("Cycle:  %d\n\n", cfg.CycleNumber)
 
 	for _, lift := range fivethreeone.AllLifts() {
 		lc, ok := cfg.Lifts[lift]
 		if !ok {
 			continue
 		}
-		fmt.Printf("%-16s 1RM: %.1f kg  TM: %.1f kg", lift.DisplayName(), lc.OneRepMaxKg, lc.TrainingMax())
+		fmt.Printf("%-16s TM: %.1f kg", lift.DisplayName(), lc.TrainingMaxKg)
 		if weeks, exists := cfg.RoutineIDs[lift]; exists {
 			fmt.Printf("  (%d routines configured)", len(weeks))
 		}
 		fmt.Println()
 
-		sets := fivethreeone.CalculateRoutineSets(lc.TrainingMax(), cfg.WeekNumber, lc.UseLbs)
-		for _, s := range sets {
-			amrap := ""
-			if s.IsAMRAP {
-				amrap = "+"
+		for week := 1; week <= 4; week++ {
+			fmt.Printf("  %s:\n", fivethreeone.WeekName(week))
+			sets := fivethreeone.CalculateRoutineSets(lc.TrainingMaxKg, week, lc.UseLbs)
+			for _, s := range sets {
+				amrap := ""
+				if s.IsAMRAP {
+					amrap = "+"
+				}
+				fmt.Printf("    [%s] %.1f kg x%d%s\n", s.Type, s.WeightKg, s.Reps, amrap)
 			}
-			fmt.Printf("  [%s] %.1f kg x%d%s\n", s.Type, s.WeightKg, s.Reps, amrap)
 		}
 		fmt.Println()
 	}
