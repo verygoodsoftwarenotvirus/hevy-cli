@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +60,8 @@ Commands:
   exercises get <id>         Get a single exercise template
   workouts list              List recent workouts
   workouts lastweek [-n N]   Print workouts from N weeks ago (default 1, 0 = this week)
+  workouts cyclesofar        Print this 5/3/1 cycle's working weeks so far (excludes deload)
+  workouts lastcycle         Print the previous 5/3/1 cycle's working weeks (excludes deload)
   workouts count             Print total workout count
   workouts get <id>          Get a single workout
   routines list [--folder=T] List routines, optionally filtered by folder title
@@ -137,7 +141,7 @@ func cmdExercises(ctx context.Context, client *hevy.Client, args []string) {
 
 func cmdWorkouts(ctx context.Context, client *hevy.Client, args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: hevy workouts <list|count|get> [args]")
+		fmt.Fprintln(os.Stderr, "Usage: hevy workouts <list|lastweek|cyclesofar|lastcycle|count|get> [args]")
 		os.Exit(1)
 	}
 
@@ -156,6 +160,10 @@ func cmdWorkouts(ctx context.Context, client *hevy.Client, args []string) {
 		}
 	case "lastweek":
 		cmdWorkoutsLastWeek(ctx, client, args[1:])
+	case "cyclesofar":
+		cmdWorkoutsCycle(ctx, client, args[1:], 0)
+	case "lastcycle":
+		cmdWorkoutsCycle(ctx, client, args[1:], 1)
 	case "count":
 		count, err := client.GetWorkoutCount(ctx)
 		if err != nil {
@@ -250,28 +258,115 @@ func cmdWorkoutsLastWeek(ctx context.Context, client *hevy.Client, args []string
 	fmt.Printf("%d workout(s)\n", len(collected))
 
 	for _, w := range collected {
-		fmt.Printf("\n%s — %s\n", w.StartTime.Format("Mon 2006-01-02 15:04"), w.Title)
-		for _, e := range w.Exercises {
-			fmt.Printf("\n  %s\n", e.Title)
-			if e.Notes != "" {
-				fmt.Printf("    Notes: %s\n", e.Notes)
-			}
-			for _, s := range e.Sets {
-				weight := ""
-				if s.WeightKg != nil {
-					weight = fmt.Sprintf("%.1f kg", *s.WeightKg)
-				}
-				reps := ""
-				if s.Reps != nil {
-					reps = fmt.Sprintf("x%d", *s.Reps)
-				}
-				rpe := ""
-				if s.RPE != nil {
-					rpe = fmt.Sprintf("  @RPE %.1f", *s.RPE)
-				}
-				fmt.Printf("    [%s] %s %s%s\n", s.Type, weight, reps, rpe)
-			}
+		printWorkoutDetail(w)
+	}
+}
+
+// printWorkoutDetail prints a workout's exercises, sets, weights, reps, and RPE.
+func printWorkoutDetail(w hevy.Workout) {
+	fmt.Printf("\n%s — %s\n", w.StartTime.Format("Mon 2006-01-02 15:04"), w.Title)
+	for _, e := range w.Exercises {
+		fmt.Printf("\n  %s\n", e.Title)
+		if e.Notes != "" {
+			fmt.Printf("    Notes: %s\n", e.Notes)
 		}
+		for _, s := range e.Sets {
+			weight := ""
+			if s.WeightKg != nil {
+				weight = fmt.Sprintf("%.1f kg", *s.WeightKg)
+			}
+			reps := ""
+			if s.Reps != nil {
+				reps = fmt.Sprintf("x%d", *s.Reps)
+			}
+			rpe := ""
+			if s.RPE != nil {
+				rpe = fmt.Sprintf("  @RPE %.1f", *s.RPE)
+			}
+			fmt.Printf("    [%s] %s %s%s\n", s.Type, weight, reps, rpe)
+		}
+	}
+}
+
+// cycleTitleRE matches 5/3/1 workout titles like "C3W1 -- Squat", capturing the
+// cycle number and the week number within that cycle.
+var cycleTitleRE = regexp.MustCompile(`^C(\d+)W(\d+)`)
+
+// deloadWeek is the deload week within a 5/3/1 cycle (weeks 1-3 are working
+// weeks); see fivethreeone/program.go.
+const deloadWeek = 4
+
+// cmdWorkoutsCycle prints the working-week (non-deload) workouts of a 5/3/1
+// cycle, identified purely from workout titles (C<cycle>W<week>). cyclesAgo is 0
+// for the current cycle ("cyclesofar") and 1 for the previous one ("lastcycle").
+func cmdWorkoutsCycle(ctx context.Context, client *hevy.Client, args []string, cyclesAgo int) {
+	name := "cyclesofar"
+	if cyclesAgo > 0 {
+		name = "lastcycle"
+	}
+	fs := flag.NewFlagSet("workouts "+name, flag.ExitOnError)
+	includeDeload := fs.Bool("include-deload", false, "include the deload week (week 4)")
+	fs.Parse(args)
+
+	// Hevy returns workouts newest-first. The first title we can parse fixes the
+	// current cycle; the target cycle is that minus cyclesAgo. Cycle numbers only
+	// ever increase over time, so once we see an older cycle we're done.
+	targetCycle := -1
+	var collected []hevy.Workout
+	for w, err := range client.ListWorkouts(ctx) {
+		if err != nil {
+			slog.Error("listing workouts", "error", err)
+			os.Exit(1)
+		}
+		m := cycleTitleRE.FindStringSubmatch(w.Title)
+		if m == nil {
+			continue
+		}
+		cyc, _ := strconv.Atoi(m[1])
+		wk, _ := strconv.Atoi(m[2])
+
+		if targetCycle == -1 {
+			targetCycle = cyc - cyclesAgo
+		}
+		if cyc > targetCycle {
+			continue // a newer cycle than the one we want (only happens for lastcycle)
+		}
+		if cyc < targetCycle {
+			break // reached an older cycle; everything below is older still
+		}
+		if wk >= deloadWeek && !*includeDeload {
+			continue // skip deload
+		}
+		collected = append(collected, w)
+	}
+
+	if targetCycle < 1 {
+		if cyclesAgo > 0 {
+			fmt.Println("No previous cycle found.")
+		} else {
+			fmt.Println("No 5/3/1 workouts found (titles like \"C3W1\").")
+		}
+		return
+	}
+
+	sort.Slice(collected, func(i, j int) bool {
+		return collected[i].StartTime.Before(collected[j].StartTime)
+	})
+
+	scope := "through today"
+	if cyclesAgo > 0 {
+		scope = "(previous cycle)"
+	}
+	fmt.Printf("Cycle %d %s\n", targetCycle, scope)
+
+	if len(collected) == 0 {
+		fmt.Println("No working-week workouts logged for this cycle.")
+		return
+	}
+
+	fmt.Printf("%d workout(s)\n", len(collected))
+	for _, w := range collected {
+		printWorkoutDetail(w)
 	}
 }
 
