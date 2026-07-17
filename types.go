@@ -242,6 +242,7 @@ type RoutineSetRequest struct {
 	DistanceMeters  *int      `json:"distance_meters,omitempty"`
 	DurationSeconds *int      `json:"duration_seconds,omitempty"`
 	CustomMetric    *float64  `json:"custom_metric,omitempty"`
+	RPE             *float64  `json:"rpe,omitempty"`
 	Type            SetType   `json:"type"`
 }
 

@@ -66,10 +66,10 @@ Commands:
   workouts get <id>          Get a single workout
   routines list [--folder=T] List routines, optionally filtered by folder title
   routines get <id>          Get a single routine
-  531 init --config=FILE     Set up 5/3/1 program
-  531 sync --config=FILE     Update routines for current week
-  531 advance --config=FILE  Advance to next week/cycle
-  531 status --config=FILE   Print current program status
+  531 init --config=FILE          Set up 5/3/1 program
+  531 sync --config=FILE          Update routines for current week
+  531 status --config=FILE        Print current program status
+  531 fix-exercises --config=FILE Resolve/create warmup & auxiliary exercise templates
 
 Environment:
   HEVY_API_KEY               API key (required, from https://hevy.com/settings?developer)`)

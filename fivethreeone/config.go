@@ -90,15 +90,24 @@ func (l Lift) TMIncrementKg() float64 {
 
 // AuxiliaryExercise describes a user-supplied accessory movement appended to a lift's
 // routine on every week (including deload). Either Reps or DurationSeconds should be set.
-// Weight and rest are optional.
+// Weight, rest, and notes are optional.
+//
+// When ExerciseTemplateID is empty, 'hevy 531 fix-exercises' resolves it from Name: it
+// looks the title up in the Hevy library and, if it isn't found and ExerciseType is set,
+// creates a custom template using ExerciseType/EquipmentCategory/MuscleGroup/OtherMuscles.
 type AuxiliaryExercise struct {
-	DurationSeconds    *int     `json:"duration_seconds,omitempty"`
-	WeightKg           *float64 `json:"weight_kg,omitempty"`
-	RestSeconds        *int     `json:"rest_seconds,omitempty"`
-	Name               string   `json:"name,omitempty"`
-	ExerciseTemplateID string   `json:"exercise_template_id"`
-	Sets               int      `json:"sets"`
-	Reps               int      `json:"reps,omitempty"`
+	DurationSeconds    *int                   `json:"duration_seconds,omitempty"`
+	WeightKg           *float64               `json:"weight_kg,omitempty"`
+	RestSeconds        *int                   `json:"rest_seconds,omitempty"`
+	Name               string                 `json:"name,omitempty"`
+	Notes              string                 `json:"notes,omitempty"`
+	ExerciseTemplateID string                 `json:"exercise_template_id"`
+	ExerciseType       hevy.ExerciseType      `json:"exercise_type,omitempty"`
+	EquipmentCategory  hevy.EquipmentCategory `json:"equipment_category,omitempty"`
+	MuscleGroup        hevy.MuscleGroup       `json:"muscle_group,omitempty"`
+	OtherMuscles       []hevy.MuscleGroup     `json:"other_muscles,omitempty"`
+	Sets               int                    `json:"sets"`
+	Reps               int                    `json:"reps,omitempty"`
 }
 
 // LiftConfig holds the training max and exercise template IDs for one lift.
@@ -110,6 +119,9 @@ type LiftConfig struct {
 	Cooldown              []AuxiliaryExercise `json:"cooldown,omitempty"`
 	TrainingMaxKg         float64             `json:"training_max_kg"`
 	UseLbs                bool                `json:"use_lbs,omitempty"`
+	// EmptyBarWarmup prepends an empty-barbell warmup set to the main lift's working
+	// sets. Enabled for the major lifts except the deadlift.
+	EmptyBarWarmup bool `json:"empty_bar_warmup,omitempty"`
 }
 
 // Config holds the complete 5/3/1 program state.
@@ -134,19 +146,72 @@ func LoadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// findTemplateByTitle searches all exercise templates for one matching the given title
-// (case-insensitive) and returns its ID.
-func findTemplateByTitle(ctx context.Context, client *hevy.Client, title string) (string, error) {
+// lookupTemplateByTitle searches all exercise templates for one matching the given title
+// (case-insensitive). The boolean reports whether a match was found, distinguishing a
+// genuine "not found" from an API error so callers can create the template when missing.
+func lookupTemplateByTitle(ctx context.Context, client *hevy.Client, title string) (string, bool, error) {
 	want := strings.ToLower(title)
 	for tmpl, err := range client.ListExerciseTemplates(ctx) {
 		if err != nil {
-			return "", fmt.Errorf("listing exercise templates: %w", err)
+			return "", false, fmt.Errorf("listing exercise templates: %w", err)
 		}
 		if strings.ToLower(tmpl.Title) == want {
-			return tmpl.ID, nil
+			return tmpl.ID, true, nil
 		}
 	}
-	return "", fmt.Errorf("exercise template %q not found", title)
+	return "", false, nil
+}
+
+// findTemplateByTitle searches all exercise templates for one matching the given title
+// (case-insensitive) and returns its ID, erroring if no match exists.
+func findTemplateByTitle(ctx context.Context, client *hevy.Client, title string) (string, error) {
+	id, found, err := lookupTemplateByTitle(ctx, client, title)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("exercise template %q not found", title)
+	}
+	return id, nil
+}
+
+// resolveAuxTemplates fills in the ExerciseTemplateID of each named exercise that doesn't
+// already have one. Names are resolved against the Hevy library; a name that isn't found
+// is created as a custom template when the entry carries an ExerciseType (its creation
+// metadata), and is otherwise treated as an error. Entries that already have an
+// ExerciseTemplateID are left untouched — the Name is only a label there, not necessarily
+// an exact Hevy title. desc labels the group for log/error messages.
+func resolveAuxTemplates(ctx context.Context, client *hevy.Client, list []AuxiliaryExercise, desc string) error {
+	for i := range list {
+		aux := &list[i]
+		if aux.Name == "" || aux.ExerciseTemplateID != "" {
+			continue
+		}
+		id, found, err := lookupTemplateByTitle(ctx, client, aux.Name)
+		if err != nil {
+			return fmt.Errorf("finding %s %q: %w", desc, aux.Name, err)
+		}
+		if !found {
+			if aux.ExerciseType == "" {
+				return fmt.Errorf("%s %q not found in Hevy and has no exercise_type to create it from", desc, aux.Name)
+			}
+			id, err = client.CreateExerciseTemplate(ctx, &hevy.ExerciseTemplateRequest{
+				Title:             aux.Name,
+				ExerciseType:      aux.ExerciseType,
+				EquipmentCategory: aux.EquipmentCategory,
+				MuscleGroup:       aux.MuscleGroup,
+				OtherMuscles:      aux.OtherMuscles,
+			})
+			if err != nil {
+				return fmt.Errorf("creating custom %s %q: %w", desc, aux.Name, err)
+			}
+			fmt.Printf("%s %q: created custom exercise template → %s\n", desc, aux.Name, id)
+		} else {
+			fmt.Printf("%s %q: exercise template ID → %s\n", desc, aux.Name, id)
+		}
+		aux.ExerciseTemplateID = id
+	}
+	return nil
 }
 
 // FindExerciseTemplateID searches for the main lift exercise template.
@@ -159,9 +224,12 @@ func FindBBBExerciseTemplateID(ctx context.Context, client *hevy.Client, lift Li
 	return findTemplateByTitle(ctx, client, lift.HevyBBBTitle())
 }
 
-// RefreshExerciseTemplateIDs re-resolves exercise template IDs in the config from the
-// Hevy API. It re-resolves BBB assistance IDs (which have known canonical titles) and
-// any auxiliary/warmup/cooldown exercises that have a Name field set.
+// RefreshExerciseTemplateIDs resolves exercise template IDs in the config from the Hevy
+// API. It re-resolves BBB assistance IDs (which have known canonical titles) and fills in
+// any warmup/auxiliary/cooldown exercises that have a Name but no ExerciseTemplateID yet,
+// creating custom templates for names not present in the Hevy library that carry an
+// exercise_type (see AuxiliaryExercise). Entries that already have an ID are left as-is,
+// so hand-picked IDs are never clobbered.
 //
 // Main lift IDs are intentionally left alone — they were chosen interactively at init
 // time and may not match the hardcoded canonical titles. If a main lift ID has gone
@@ -172,68 +240,31 @@ func RefreshExerciseTemplateIDs(ctx context.Context, client *hevy.Client, cfg *C
 		if !ok {
 			continue
 		}
+		name := lift.DisplayName()
 
 		if liftCfg.BBBExerciseTemplateID != "" {
 			bbbID, err := FindBBBExerciseTemplateID(ctx, client, lift)
 			if err != nil {
-				return fmt.Errorf("finding BBB exercise template for %s: %w", lift.DisplayName(), err)
+				return fmt.Errorf("finding BBB exercise template for %s: %w", name, err)
 			}
 			liftCfg.BBBExerciseTemplateID = bbbID
-			fmt.Printf("%s BBB: exercise template ID → %s\n", lift.DisplayName(), bbbID)
+			fmt.Printf("%s BBB: exercise template ID → %s\n", name, bbbID)
 		}
 
-		for i, aux := range liftCfg.Warmup {
-			if aux.Name == "" {
-				continue
-			}
-			id, err := findTemplateByTitle(ctx, client, aux.Name)
-			if err != nil {
-				return fmt.Errorf("finding warmup template %q for %s: %w", aux.Name, lift.DisplayName(), err)
-			}
-			liftCfg.Warmup[i].ExerciseTemplateID = id
-			fmt.Printf("%s warmup %q: exercise template ID → %s\n", lift.DisplayName(), aux.Name, id)
+		if err := resolveAuxTemplates(ctx, client, liftCfg.Warmup, name+" warmup"); err != nil {
+			return err
 		}
-
-		for i, aux := range liftCfg.AuxiliaryExercises {
-			if aux.Name == "" {
-				continue
-			}
-			id, err := findTemplateByTitle(ctx, client, aux.Name)
-			if err != nil {
-				return fmt.Errorf("finding auxiliary template %q for %s: %w", aux.Name, lift.DisplayName(), err)
-			}
-			liftCfg.AuxiliaryExercises[i].ExerciseTemplateID = id
-			fmt.Printf("%s auxiliary %q: exercise template ID → %s\n", lift.DisplayName(), aux.Name, id)
+		if err := resolveAuxTemplates(ctx, client, liftCfg.AuxiliaryExercises, name+" auxiliary"); err != nil {
+			return err
 		}
-
-		for i, c := range liftCfg.Cooldown {
-			if c.Name == "" {
-				continue
-			}
-			id, err := findTemplateByTitle(ctx, client, c.Name)
-			if err != nil {
-				return fmt.Errorf("finding cooldown template %q for %s: %w", c.Name, lift.DisplayName(), err)
-			}
-			liftCfg.Cooldown[i].ExerciseTemplateID = id
-			fmt.Printf("%s cooldown %q: exercise template ID → %s\n", lift.DisplayName(), c.Name, id)
+		if err := resolveAuxTemplates(ctx, client, liftCfg.Cooldown, name+" cooldown"); err != nil {
+			return err
 		}
 
 		cfg.Lifts[lift] = liftCfg
 	}
 
-	for i, w := range cfg.Warmup {
-		if w.Name == "" {
-			continue
-		}
-		id, err := findTemplateByTitle(ctx, client, w.Name)
-		if err != nil {
-			return fmt.Errorf("finding global warmup template %q: %w", w.Name, err)
-		}
-		cfg.Warmup[i].ExerciseTemplateID = id
-		fmt.Printf("global warmup %q: exercise template ID → %s\n", w.Name, id)
-	}
-
-	return nil
+	return resolveAuxTemplates(ctx, client, cfg.Warmup, "global warmup")
 }
 
 // SaveConfig writes a Config to a JSON file.

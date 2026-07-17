@@ -7,6 +7,10 @@ import (
 	"github.com/verygoodsoftwarenotvirus/hevy-cli"
 )
 
+// emptyBarKg is the weight of a standard Olympic barbell, used for the empty-bar warmup
+// set on lifts with EmptyBarWarmup enabled.
+const emptyBarKg = 20.0
+
 // Syncer updates Hevy routines to reflect the current 5/3/1 program state.
 type Syncer struct {
 	client *hevy.Client
@@ -64,6 +68,13 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 
 	sets := CalculateRoutineSets(liftCfg.TrainingMaxKg, week, liftCfg.UseLbs)
 
+	// Warm up with the empty bar before the computed warmup/working sets (major lifts
+	// except the deadlift).
+	if liftCfg.EmptyBarWarmup {
+		emptyBar := CalculatedSet{Type: hevy.SetTypeWarmup, WeightKg: emptyBarKg, Reps: 5}
+		sets = append([]CalculatedSet{emptyBar}, sets...)
+	}
+
 	var routineSets []hevy.RoutineSetRequest
 	for _, cs := range sets {
 		weight := cs.WeightKg
@@ -71,6 +82,8 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 		// uses rep_range, the plain reps field is ignored on every other set. Since
 		// the AMRAP set needs a range, encode all working sets as ranges (fixed-rep
 		// sets collapse to start == end).
+		// The AMRAP set is encoded as a wide rep range (its minimum up to 20); Hevy's
+		// routine API rejects an rpe field on routine sets, so it isn't set here.
 		repRange := &hevy.RepRange{Start: cs.Reps, End: cs.Reps}
 		if cs.IsAMRAP {
 			repRange.End = 20
@@ -165,6 +178,7 @@ func auxToExerciseRequest(aux AuxiliaryExercise) hevy.RoutineExerciseRequest {
 	return hevy.RoutineExerciseRequest{
 		ExerciseTemplateID: aux.ExerciseTemplateID,
 		RestSeconds:        &restSeconds,
+		Notes:              aux.Notes,
 		Sets:               auxSets,
 	}
 }
