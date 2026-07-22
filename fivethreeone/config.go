@@ -25,6 +25,25 @@ func AllLifts() []Lift {
 	return []Lift{Squat, BenchPress, OverheadPress, Deadlift}
 }
 
+// ParseLift resolves a user-supplied string to one of the four main lifts. It
+// accepts the canonical key (e.g. "bench_press"), common spellings with spaces
+// or hyphens ("bench press", "overhead-press"), and a few short aliases
+// ("bench", "ohp", "press", "dead"). Matching is case-insensitive.
+func ParseLift(s string) (Lift, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "squat", "sq":
+		return Squat, true
+	case "bench_press", "bench press", "bench-press", "bench", "bp":
+		return BenchPress, true
+	case "overhead_press", "overhead press", "overhead-press", "overhead", "ohp", "press", "ohp_press":
+		return OverheadPress, true
+	case "deadlift", "dead lift", "dead-lift", "dead", "dl":
+		return Deadlift, true
+	default:
+		return "", false
+	}
+}
+
 // DisplayName returns a human-readable name for the lift.
 func (l Lift) DisplayName() string {
 	switch l {

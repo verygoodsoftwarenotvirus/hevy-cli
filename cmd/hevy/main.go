@@ -67,8 +67,9 @@ Commands:
   routines list [--folder=T] List routines, optionally filtered by folder title
   routines get <id>          Get a single routine
   531 init --config=FILE          Set up 5/3/1 program
-  531 sync --config=FILE          Update routines for current week
+  531 sync --config=FILE          Update routines for current week (never changes training maxes)
   531 status --config=FILE        Print current program status
+  531 tm <lift> (--set N|--by N|--increment)  Set or adjust a lift's training max
   531 fix-exercises --config=FILE Resolve/create warmup & auxiliary exercise templates
 
 Environment:
@@ -503,7 +504,7 @@ func cmdRoutinesList(ctx context.Context, client *hevy.Client, args []string) {
 
 func cmd531(ctx context.Context, client *hevy.Client, args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: hevy 531 <init|sync|status|fix-exercises> --config=FILE")
+		fmt.Fprintln(os.Stderr, "Usage: hevy 531 <init|sync|status|tm|fix-exercises> --config=FILE")
 		os.Exit(1)
 	}
 
@@ -514,6 +515,8 @@ func cmd531(ctx context.Context, client *hevy.Client, args []string) {
 		cmd531Sync(ctx, client, args[1:])
 	case "status":
 		cmd531Status(args[1:])
+	case "tm":
+		cmd531TM(args[1:])
 	case "fix-exercises":
 		cmd531FixExercises(ctx, client, args[1:])
 	default:
@@ -604,7 +607,7 @@ func create531Folder(ctx context.Context, client *hevy.Client, cycleNumber int) 
 func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
 	fs := flag.NewFlagSet("531 sync", flag.ExitOnError)
 	configPath := fs.String("config", "531.json", "path to 5/3/1 config file")
-	nextCycle := fs.Bool("next-cycle", false, "advance to the next cycle: bump training maxes (upper +2.5kg, lower +5kg) and create fresh routines")
+	nextCycle := fs.Bool("next-cycle", false, "advance to the next cycle: create a fresh routine folder and routines (training maxes are left untouched — use 'hevy 531 tm' to change them)")
 	fs.Parse(args)
 
 	cfg, err := fivethreeone.LoadConfig(*configPath)
@@ -614,11 +617,6 @@ func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
 	}
 
 	if *nextCycle {
-		for lift, lc := range cfg.Lifts {
-			lc.TrainingMaxKg += lift.TMIncrementKg()
-			cfg.Lifts[lift] = lc
-			fmt.Printf("%s — training max now %.1f kg (+%.1f)\n", lift.DisplayName(), lc.TrainingMaxKg, lift.TMIncrementKg())
-		}
 		cfg.CycleNumber++
 		cfg.RoutineIDs = nil
 		folderID, err := create531Folder(ctx, client, cfg.CycleNumber)
@@ -705,4 +703,89 @@ func cmd531Status(args []string) {
 		}
 		fmt.Println()
 	}
+}
+
+// cmd531TM sets or adjusts the training max of a single lift. This is the only
+// command that mutates a training max; routine planning ('531 sync') never
+// touches it.
+func cmd531TM(args []string) {
+	fs := flag.NewFlagSet("531 tm", flag.ExitOnError)
+	configPath := fs.String("config", "531.json", "path to 5/3/1 config file")
+	set := fs.Float64("set", -1, "set the training max to this many kg")
+	by := fs.Float64("by", 0, "adjust the training max by this many kg (may be negative)")
+	increment := fs.Bool("increment", false, "bump the training max by the standard 5/3/1 amount (upper +2.5kg, lower +5kg)")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: hevy 531 tm <squat|bench_press|overhead_press|deadlift> (--set N | --by N | --increment) [--config=FILE]")
+		fs.PrintDefaults()
+	}
+
+	// The lift is a required positional argument that comes first; the stdlib
+	// flag package stops parsing at the first positional, so pull it off before
+	// parsing the remaining flags.
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fs.Usage()
+		os.Exit(1)
+	}
+	liftArg := args[0]
+	fs.Parse(args[1:])
+
+	lift, ok := fivethreeone.ParseLift(liftArg)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "unknown lift: %q (want one of squat, bench_press, overhead_press, deadlift)\n", liftArg)
+		os.Exit(1)
+	}
+
+	// Exactly one of --set, --by, or --increment must be provided.
+	modes := 0
+	if *set >= 0 {
+		modes++
+	}
+	if *by != 0 {
+		modes++
+	}
+	if *increment {
+		modes++
+	}
+	if modes != 1 {
+		fmt.Fprintln(os.Stderr, "specify exactly one of --set, --by, or --increment")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	cfg, err := fivethreeone.LoadConfig(*configPath)
+	if err != nil {
+		slog.Error("loading config", "error", err)
+		os.Exit(1)
+	}
+
+	lc, ok := cfg.Lifts[lift]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "%s is not configured in %s — run 'hevy 531 init' first\n", lift.DisplayName(), *configPath)
+		os.Exit(1)
+	}
+
+	old := lc.TrainingMaxKg
+	switch {
+	case *set >= 0:
+		lc.TrainingMaxKg = *set
+	case *increment:
+		lc.TrainingMaxKg += lift.TMIncrementKg()
+	default:
+		lc.TrainingMaxKg += *by
+	}
+
+	if lc.TrainingMaxKg < 0 {
+		fmt.Fprintf(os.Stderr, "resulting training max would be negative (%.1f kg)\n", lc.TrainingMaxKg)
+		os.Exit(1)
+	}
+
+	cfg.Lifts[lift] = lc
+
+	if err := fivethreeone.SaveConfig(*configPath, cfg); err != nil {
+		slog.Error("saving config", "error", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("%s — training max %.1f kg → %.1f kg\n", lift.DisplayName(), old, lc.TrainingMaxKg)
+	fmt.Println("Run 'hevy 531 sync' to push the updated routines to Hevy.")
 }
