@@ -1,6 +1,9 @@
 package hevy
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // SetType represents the type of a set.
 type SetType string
@@ -264,6 +267,12 @@ type workoutsResponse struct {
 	Workouts  []Workout `json:"workouts"`
 	Page      int       `json:"page"`
 	PageCount int       `json:"page_count"`
+}
+
+type rawWorkoutsResponse struct {
+	Workouts  []json.RawMessage `json:"workouts"`
+	Page      int               `json:"page"`
+	PageCount int               `json:"page_count"`
 }
 
 type workoutCountResponse struct {

@@ -14,8 +14,12 @@ import (
 	"time"
 
 	"github.com/verygoodsoftwarenotvirus/hevy-cli"
+	"github.com/verygoodsoftwarenotvirus/hevy-cli/archive"
 	"github.com/verygoodsoftwarenotvirus/hevy-cli/fivethreeone"
 )
+
+// archiveProgressEvery is how many scanned workouts pass between archive progress lines.
+const archiveProgressEvery = 25
 
 func main() {
 	if len(os.Args) < 2 {
@@ -43,6 +47,8 @@ func main() {
 		cmdRoutines(ctx, client, os.Args[2:])
 	case "531":
 		cmd531(ctx, client, os.Args[2:])
+	case "archive":
+		cmdArchive(ctx, apiKey, os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		printUsage()
@@ -66,6 +72,8 @@ Commands:
   workouts get <id>          Get a single workout
   routines list [--folder=T] List routines, optionally filtered by folder title
   routines get <id>          Get a single routine
+  archive --year Y [--out FILE] [--tz ZONE] [--force]
+                             Export a year of workouts to a SQLite file
   531 init --config=FILE          Set up 5/3/1 program
   531 sync --config=FILE          Update routines for current week (never changes training maxes)
   531 status --config=FILE        Print current program status
@@ -83,6 +91,74 @@ func cmdUser(ctx context.Context, client *hevy.Client) {
 		os.Exit(1)
 	}
 	fmt.Printf("ID:   %s\nName: %s\nURL:  %s\n", info.ID, info.Name, info.URL)
+}
+
+// cmdArchive exports a calendar year of workouts into a SQLite file.
+//
+// It builds its own client rather than reusing main's, because a full-year scan is long enough that
+// retrying rate limits and transient failures matters.
+func cmdArchive(ctx context.Context, apiKey string, args []string) {
+	fs := flag.NewFlagSet("archive", flag.ExitOnError)
+	year := fs.Int("year", 0, "calendar year to archive (required)")
+	out := fs.String("out", "", "output SQLite file (default: hevy-<year>.db)")
+	tz := fs.String("tz", "", "IANA timezone used to decide which year a workout falls in (default: local)")
+	force := fs.Bool("force", false, "overwrite the output file if it already exists")
+	fs.Parse(args)
+
+	if *year <= 0 {
+		fmt.Fprintln(os.Stderr, "--year is required, e.g. hevy archive --year 2025")
+		os.Exit(1)
+	}
+
+	loc := time.Local //nolint:gosmopolitan // local time is the intended default; --tz overrides it.
+	if *tz != "" {
+		var err error
+		if loc, err = time.LoadLocation(*tz); err != nil {
+			slog.Error("loading timezone", "tz", *tz, "error", err)
+			os.Exit(1)
+		}
+	}
+
+	outPath := *out
+	if outPath == "" {
+		outPath = fmt.Sprintf("hevy-%d.db", *year)
+	}
+
+	// Scanning a year means many sequential API pages, so report progress rather than sit silent.
+	reportedAt := 0
+	progress := func(fetched, kept int) {
+		if fetched-reportedAt < archiveProgressEvery {
+			return
+		}
+		reportedAt = fetched
+		fmt.Fprintf(os.Stderr, "scanned %d workouts, %d in %d...\n", fetched, kept, *year)
+	}
+
+	result, err := archive.Run(ctx, archive.NewClient(apiKey), archive.Options{
+		Location: loc,
+		Out:      outPath,
+		Year:     *year,
+		Force:    *force,
+	}, progress)
+	if err != nil {
+		slog.Error("archiving workouts", "error", err)
+		os.Exit(1)
+	}
+
+	if result.Workouts == 0 {
+		fmt.Printf("No workouts found in %d (scanned %d). Wrote an empty archive to %s\n",
+			*year, result.Fetched, outPath)
+		return
+	}
+
+	fmt.Printf("Archived %d workouts (%d exercises, %d sets) spanning %s to %s into %s\n",
+		result.Workouts, result.Exercises, result.Sets,
+		result.First.Format(time.DateOnly), result.Last.Format(time.DateOnly), outPath)
+	fmt.Printf("Scanned %d workouts in total.\n", result.Fetched)
+
+	if result.OutOfOrder {
+		fmt.Println("Note: the API returned workouts out of start-time order, so the full history was scanned.")
+	}
 }
 
 func cmdExercises(ctx context.Context, client *hevy.Client, args []string) {
