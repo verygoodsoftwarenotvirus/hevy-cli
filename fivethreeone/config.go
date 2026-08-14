@@ -131,7 +131,10 @@ type AuxiliaryExercise struct {
 
 // LiftConfig holds the training max and exercise template IDs for one lift.
 type LiftConfig struct {
-	ExerciseTemplateID    string              `json:"exercise_template_id"`
+	ExerciseTemplateID string `json:"exercise_template_id"`
+	// BBBExerciseTemplateID is the separate exercise the BBB preset logs its sets against.
+	// It is kept even while another preset is selected, so switching back to BBB doesn't
+	// require re-resolving it.
 	BBBExerciseTemplateID string              `json:"bbb_exercise_template_id"`
 	Warmup                []AuxiliaryExercise `json:"warmup,omitempty"`
 	AuxiliaryExercises    []AuxiliaryExercise `json:"auxiliary_exercises,omitempty"`
@@ -145,11 +148,23 @@ type LiftConfig struct {
 
 // Config holds the complete 5/3/1 program state.
 type Config struct {
-	Lifts       map[Lift]LiftConfig     `json:"lifts"`
-	RoutineIDs  map[Lift]map[int]string `json:"routine_ids,omitempty"`
-	FolderID    *int                    `json:"folder_id,omitempty"`
-	Warmup      []AuxiliaryExercise     `json:"warmup,omitempty"`
-	CycleNumber int                     `json:"cycle_number"`
+	Lifts      map[Lift]LiftConfig     `json:"lifts"`
+	RoutineIDs map[Lift]map[int]string `json:"routine_ids,omitempty"`
+	FolderID   *int                    `json:"folder_id,omitempty"`
+	// Assistance selects the supplemental-volume preset applied to every lift. An empty
+	// value means DefaultAssistanceScheme; switch presets with 'hevy 531 assistance'.
+	Assistance  AssistanceScheme    `json:"assistance,omitempty"`
+	Warmup      []AuxiliaryExercise `json:"warmup,omitempty"`
+	CycleNumber int                 `json:"cycle_number"`
+}
+
+// AssistanceScheme returns the configured supplemental-volume preset, falling back to
+// DefaultAssistanceScheme when the config doesn't name one.
+func (c *Config) AssistanceScheme() AssistanceScheme {
+	if c.Assistance == "" {
+		return DefaultAssistanceScheme
+	}
+	return c.Assistance
 }
 
 // LoadConfig reads a Config from a JSON file.

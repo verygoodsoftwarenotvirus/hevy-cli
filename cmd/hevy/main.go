@@ -78,6 +78,7 @@ Commands:
   531 sync --config=FILE          Update routines for current week (never changes training maxes)
   531 status --config=FILE        Print current program status
   531 tm <lift> (--set N|--by N|--increment)  Set or adjust a lift's training max
+  531 assistance [bbb|fsl|none]   Show or switch the supplemental-volume preset
   531 fix-exercises --config=FILE Resolve/create warmup & auxiliary exercise templates
 
 Environment:
@@ -260,23 +261,7 @@ func cmdWorkouts(ctx context.Context, client *hevy.Client, args []string) {
 		}
 		fmt.Printf("ID:    %s\nTitle: %s\nDate:  %s — %s\n", w.ID, w.Title,
 			w.StartTime.Format("2006-01-02 15:04"), w.EndTime.Format("15:04"))
-		for _, e := range w.Exercises {
-			fmt.Printf("\n  %s (%s)\n", e.Title, e.ExerciseTemplateID)
-			if e.Notes != "" {
-				fmt.Printf("    Notes: %s\n", e.Notes)
-			}
-			for _, s := range e.Sets {
-				weight := ""
-				if s.WeightKg != nil {
-					weight = fmt.Sprintf("%.1f kg", *s.WeightKg)
-				}
-				reps := ""
-				if s.Reps != nil {
-					reps = fmt.Sprintf("x%d", *s.Reps)
-				}
-				fmt.Printf("    [%s] %s %s\n", s.Type, weight, reps)
-			}
-		}
+		printWorkoutExercises(w.Exercises, true)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown workouts command: %s\n", args[0])
 		os.Exit(1)
@@ -339,28 +324,120 @@ func cmdWorkoutsLastWeek(ctx context.Context, client *hevy.Client, args []string
 	}
 }
 
-// printWorkoutDetail prints a workout's exercises, sets, weights, reps, and RPE.
+// setDetail is the printable view of a set from either a workout or a routine. Both API
+// types carry the same measurements — only routines have rep ranges, and only logged
+// workouts have an RPE — so one renderer covers every printout.
+type setDetail struct {
+	WeightKg        *float64
+	Reps            *int
+	RepRange        *hevy.RepRange
+	DurationSeconds *int
+	DistanceMeters  *float64
+	RPE             *float64
+	Type            hevy.SetType
+}
+
+func workoutSetDetail(s *hevy.WorkoutSet) setDetail {
+	return setDetail{
+		Type:            s.Type,
+		WeightKg:        s.WeightKg,
+		Reps:            s.Reps,
+		DurationSeconds: s.DurationSeconds,
+		DistanceMeters:  s.DistanceMeters,
+		RPE:             s.RPE,
+	}
+}
+
+func routineSetDetail(s *hevy.RoutineSet) setDetail {
+	return setDetail{
+		Type:            s.Type,
+		WeightKg:        s.WeightKg,
+		Reps:            s.Reps,
+		RepRange:        s.RepRange,
+		DurationSeconds: s.DurationSeconds,
+		DistanceMeters:  s.DistanceMeters,
+		RPE:             s.RPE,
+	}
+}
+
+// String renders a set as an indented line, e.g. "    [normal] 60.0 kg x5 @RPE 8.0".
+// Only the measurements the set actually carries are printed, so duration-based work
+// (dead hangs, planks) shows its time instead of reps it will never have.
+func (d setDetail) String() string {
+	parts := []string{fmt.Sprintf("[%s]", d.Type)}
+	if d.WeightKg != nil {
+		parts = append(parts, fmt.Sprintf("%.1f kg", *d.WeightKg))
+	}
+	if d.Reps != nil {
+		parts = append(parts, fmt.Sprintf("x%d", *d.Reps))
+	}
+	if d.RepRange != nil {
+		if d.RepRange.Start == d.RepRange.End {
+			parts = append(parts, fmt.Sprintf("x%d", d.RepRange.Start))
+		} else {
+			parts = append(parts, fmt.Sprintf("x%d-%d", d.RepRange.Start, d.RepRange.End))
+		}
+	}
+	if d.DistanceMeters != nil {
+		parts = append(parts, fmt.Sprintf("%s m", strconv.FormatFloat(*d.DistanceMeters, 'f', -1, 64)))
+	}
+	if d.DurationSeconds != nil {
+		parts = append(parts, formatDuration(*d.DurationSeconds))
+	}
+	if d.RPE != nil {
+		parts = append(parts, fmt.Sprintf("@RPE %.1f", *d.RPE))
+	}
+	return "    " + strings.Join(parts, " ")
+}
+
+// formatDuration renders a set's duration as "45s", "1m", or "1m 30s".
+func formatDuration(seconds int) string {
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	minutes, remainder := seconds/60, seconds%60
+	if remainder == 0 {
+		return fmt.Sprintf("%dm", minutes)
+	}
+	return fmt.Sprintf("%dm %ds", minutes, remainder)
+}
+
+// printWorkoutDetail prints a workout's exercises and sets.
 func printWorkoutDetail(w hevy.Workout) {
 	fmt.Printf("\n%s — %s\n", w.StartTime.Format("Mon 2006-01-02 15:04"), w.Title)
-	for _, e := range w.Exercises {
-		fmt.Printf("\n  %s\n", e.Title)
+	printWorkoutExercises(w.Exercises, false)
+}
+
+// printWorkoutExercises prints each logged exercise with its notes and sets.
+func printWorkoutExercises(exercises []hevy.WorkoutExercise, showTemplateIDs bool) {
+	for _, e := range exercises {
+		if showTemplateIDs {
+			fmt.Printf("\n  %s (%s)\n", e.Title, e.ExerciseTemplateID)
+		} else {
+			fmt.Printf("\n  %s\n", e.Title)
+		}
 		if e.Notes != "" {
 			fmt.Printf("    Notes: %s\n", e.Notes)
 		}
-		for _, s := range e.Sets {
-			weight := ""
-			if s.WeightKg != nil {
-				weight = fmt.Sprintf("%.1f kg", *s.WeightKg)
-			}
-			reps := ""
-			if s.Reps != nil {
-				reps = fmt.Sprintf("x%d", *s.Reps)
-			}
-			rpe := ""
-			if s.RPE != nil {
-				rpe = fmt.Sprintf("  @RPE %.1f", *s.RPE)
-			}
-			fmt.Printf("    [%s] %s %s%s\n", s.Type, weight, reps, rpe)
+		for i := range e.Sets {
+			fmt.Println(workoutSetDetail(&e.Sets[i]))
+		}
+	}
+}
+
+// printRoutineExercises prints each planned exercise with its notes and sets.
+func printRoutineExercises(exercises []hevy.RoutineExercise, showTemplateIDs bool) {
+	for _, e := range exercises {
+		if showTemplateIDs {
+			fmt.Printf("\n  %s (%s)\n", e.Title, e.ExerciseTemplateID)
+		} else {
+			fmt.Printf("\n  %s\n", e.Title)
+		}
+		if e.Notes != "" {
+			fmt.Printf("    Notes: %s\n", e.Notes)
+		}
+		for i := range e.Sets {
+			fmt.Println(routineSetDetail(&e.Sets[i]))
 		}
 	}
 }
@@ -368,10 +445,6 @@ func printWorkoutDetail(w hevy.Workout) {
 // cycleTitleRE matches 5/3/1 workout titles like "C3W1 -- Squat", capturing the
 // cycle number and the week number within that cycle.
 var cycleTitleRE = regexp.MustCompile(`^C(\d+)W(\d+)`)
-
-// deloadWeek is the deload week within a 5/3/1 cycle (weeks 1-3 are working
-// weeks); see fivethreeone/program.go.
-const deloadWeek = 4
 
 // cmdWorkoutsCycle prints the working-week (non-deload) workouts of a 5/3/1
 // cycle, identified purely from workout titles (C<cycle>W<week>). cyclesAgo is 0
@@ -411,7 +484,7 @@ func cmdWorkoutsCycle(ctx context.Context, client *hevy.Client, args []string, c
 		if cyc < targetCycle {
 			break // reached an older cycle; everything below is older still
 		}
-		if wk >= deloadWeek && !*includeDeload {
+		if wk >= fivethreeone.DeloadWeek && !*includeDeload {
 			continue // skip deload
 		}
 		collected = append(collected, w)
@@ -467,24 +540,7 @@ func cmdRoutines(ctx context.Context, client *hevy.Client, args []string) {
 			os.Exit(1)
 		}
 		fmt.Printf("ID:    %s\nTitle: %s\nNotes: %s\n", r.ID, r.Title, r.Notes)
-		for _, e := range r.Exercises {
-			fmt.Printf("\n  %s (%s)\n", e.Title, e.ExerciseTemplateID)
-			for _, s := range e.Sets {
-				weight := ""
-				if s.WeightKg != nil {
-					weight = fmt.Sprintf("%.1f kg", *s.WeightKg)
-				}
-				reps := ""
-				if s.Reps != nil {
-					reps = fmt.Sprintf("x%d", *s.Reps)
-				}
-				repRange := ""
-				if s.RepRange != nil {
-					repRange = fmt.Sprintf("x%d-%d", s.RepRange.Start, s.RepRange.End)
-				}
-				fmt.Printf("    [%s] %s %s%s\n", s.Type, weight, reps, repRange)
-			}
-		}
+		printRoutineExercises(r.Exercises, true)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown routines command: %s\n", args[0])
 		os.Exit(1)
@@ -550,37 +606,13 @@ func cmdRoutinesList(ctx context.Context, client *hevy.Client, args []string) {
 		if r.Notes != "" {
 			fmt.Printf("  Notes: %s\n", r.Notes)
 		}
-		for _, e := range r.Exercises {
-			fmt.Printf("\n  %s\n", e.Title)
-			if e.Notes != "" {
-				fmt.Printf("    Notes: %s\n", e.Notes)
-			}
-			for _, s := range e.Sets {
-				weight := ""
-				if s.WeightKg != nil {
-					weight = fmt.Sprintf("%.1f kg", *s.WeightKg)
-				}
-				reps := ""
-				if s.Reps != nil {
-					reps = fmt.Sprintf("x%d", *s.Reps)
-				}
-				repRange := ""
-				if s.RepRange != nil {
-					repRange = fmt.Sprintf("x%d-%d", s.RepRange.Start, s.RepRange.End)
-				}
-				rpe := ""
-				if s.RPE != nil {
-					rpe = fmt.Sprintf("  @RPE %.1f", *s.RPE)
-				}
-				fmt.Printf("    [%s] %s %s%s%s\n", s.Type, weight, reps, repRange, rpe)
-			}
-		}
+		printRoutineExercises(r.Exercises, false)
 	}
 }
 
 func cmd531(ctx context.Context, client *hevy.Client, args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: hevy 531 <init|sync|status|tm|fix-exercises> --config=FILE")
+		fmt.Fprintln(os.Stderr, "Usage: hevy 531 <init|sync|status|tm|assistance|fix-exercises> --config=FILE")
 		os.Exit(1)
 	}
 
@@ -595,6 +627,8 @@ func cmd531(ctx context.Context, client *hevy.Client, args []string) {
 		cmd531TM(args[1:])
 	case "fix-exercises":
 		cmd531FixExercises(ctx, client, args[1:])
+	case "assistance":
+		cmd531Assistance(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown 531 command: %s\n", args[0])
 		os.Exit(1)
@@ -753,7 +787,8 @@ func cmd531Status(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Cycle:  %d\n\n", cfg.CycleNumber)
+	assistance := cfg.AssistanceScheme()
+	fmt.Printf("Cycle:      %d\nAssistance: %s\n\n", cfg.CycleNumber, assistance.DisplayName())
 
 	for _, lift := range fivethreeone.AllLifts() {
 		lc, ok := cfg.Lifts[lift]
@@ -766,7 +801,7 @@ func cmd531Status(args []string) {
 		}
 		fmt.Println()
 
-		for week := 1; week <= 4; week++ {
+		for week := 1; week <= fivethreeone.DeloadWeek; week++ {
 			fmt.Printf("  %s:\n", fivethreeone.WeekName(week))
 			sets := fivethreeone.CalculateRoutineSets(lc.TrainingMaxKg, week, lc.UseLbs)
 			for _, s := range sets {
@@ -776,9 +811,62 @@ func cmd531Status(args []string) {
 				}
 				fmt.Printf("    [%s] %.1f kg x%d%s\n", s.Type, s.WeightKg, s.Reps, amrap)
 			}
+			// Assistance sets are identical to one another, so print them as a count.
+			if as := fivethreeone.CalculateAssistanceSets(assistance, lc.TrainingMaxKg, week, lc.UseLbs); len(as) > 0 {
+				fmt.Printf("    [%s] %.1f kg x%d  (%d sets, %s)\n",
+					as[0].Type, as[0].WeightKg, as[0].Reps, len(as), strings.ToUpper(string(assistance)))
+			}
 		}
 		fmt.Println()
 	}
+}
+
+// cmd531Assistance switches the program's supplemental-volume preset. The change only
+// reaches Hevy on the next 'hevy 531 sync'.
+func cmd531Assistance(args []string) {
+	fs := flag.NewFlagSet("531 assistance", flag.ExitOnError)
+	configPath := fs.String("config", "531.json", "path to 5/3/1 config file")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: hevy 531 assistance [bbb|fsl|none] [--config=FILE]")
+		fs.PrintDefaults()
+	}
+
+	// The preset is an optional positional argument that comes first; the stdlib flag
+	// package stops parsing at the first positional, so pull it off before the flags.
+	preset := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		preset, args = args[0], args[1:]
+	}
+	fs.Parse(args)
+
+	cfg, err := fivethreeone.LoadConfig(*configPath)
+	if err != nil {
+		slog.Error("loading config", "error", err)
+		os.Exit(1)
+	}
+
+	// No preset named: report the current one rather than changing anything.
+	if preset == "" {
+		fmt.Printf("Assistance: %s\n", cfg.AssistanceScheme().DisplayName())
+		return
+	}
+
+	scheme, ok := fivethreeone.ParseAssistanceScheme(preset)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "unknown assistance preset: %q (want one of bbb, fsl, none)\n", preset)
+		os.Exit(1)
+	}
+
+	old := cfg.AssistanceScheme()
+	cfg.Assistance = scheme
+
+	if err := fivethreeone.SaveConfig(*configPath, cfg); err != nil {
+		slog.Error("saving config", "error", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Assistance: %s → %s\n", old.DisplayName(), scheme.DisplayName())
+	fmt.Println("Run 'hevy 531 sync' to push the updated routines to Hevy.")
 }
 
 // cmd531TM sets or adjusts the training max of a single lift. This is the only
