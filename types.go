@@ -1,6 +1,9 @@
 package hevy
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // SetType represents the type of a set.
 type SetType string
@@ -78,36 +81,36 @@ const (
 // --- Response models ---
 
 type Workout struct {
-	ID          string            `json:"id"`
-	Title       string            `json:"title"`
-	RoutineID   *string           `json:"routine_id"`
-	Description string            `json:"description"`
 	StartTime   time.Time         `json:"start_time"`
 	EndTime     time.Time         `json:"end_time"`
 	UpdatedAt   time.Time         `json:"updated_at"`
 	CreatedAt   time.Time         `json:"created_at"`
-	IsPrivate   bool              `json:"is_private"`
+	RoutineID   *string           `json:"routine_id"`
+	ID          string            `json:"id"`
+	Title       string            `json:"title"`
+	Description string            `json:"description"`
 	Exercises   []WorkoutExercise `json:"exercises"`
+	IsPrivate   bool              `json:"is_private"`
 }
 
 type WorkoutExercise struct {
-	Index              int          `json:"index"`
+	SupersetID         *int         `json:"supersets_id"`
 	Title              string       `json:"title"`
 	Notes              string       `json:"notes"`
 	ExerciseTemplateID string       `json:"exercise_template_id"`
-	SupersetID         *int         `json:"supersets_id"`
 	Sets               []WorkoutSet `json:"sets"`
+	Index              int          `json:"index"`
 }
 
 type WorkoutSet struct {
-	Index           int      `json:"index"`
-	Type            SetType  `json:"type"`
 	WeightKg        *float64 `json:"weight_kg"`
 	Reps            *int     `json:"reps"`
 	DistanceMeters  *float64 `json:"distance_meters"`
 	DurationSeconds *int     `json:"duration_seconds"`
 	RPE             *float64 `json:"rpe"`
 	CustomMetric    *float64 `json:"custom_metric"`
+	Type            SetType  `json:"type"`
+	Index           int      `json:"index"`
 }
 
 type Routine struct {
@@ -121,18 +124,16 @@ type Routine struct {
 }
 
 type RoutineExercise struct {
-	Index              int          `json:"index"`
-	Title              string       `json:"title"`
 	RestSeconds        *int         `json:"rest_seconds"`
+	SupersetID         *int         `json:"supersets_id"`
+	Title              string       `json:"title"`
 	Notes              string       `json:"notes"`
 	ExerciseTemplateID string       `json:"exercise_template_id"`
-	SupersetID         *int         `json:"supersets_id"`
 	Sets               []RoutineSet `json:"sets"`
+	Index              int          `json:"index"`
 }
 
 type RoutineSet struct {
-	Index           int       `json:"index"`
-	Type            SetType   `json:"type"`
 	WeightKg        *float64  `json:"weight_kg"`
 	Reps            *int      `json:"reps"`
 	RepRange        *RepRange `json:"rep_range"`
@@ -140,6 +141,8 @@ type RoutineSet struct {
 	DurationSeconds *int      `json:"duration_seconds"`
 	RPE             *float64  `json:"rpe"`
 	CustomMetric    *float64  `json:"custom_metric"`
+	Type            SetType   `json:"type"`
+	Index           int       `json:"index"`
 }
 
 type RepRange struct {
@@ -157,11 +160,11 @@ type ExerciseTemplate struct {
 }
 
 type RoutineFolder struct {
-	ID        int       `json:"id"`
-	Index     int       `json:"index"`
-	Title     string    `json:"title"`
 	UpdatedAt time.Time `json:"updated_at"`
 	CreatedAt time.Time `json:"created_at"`
+	Title     string    `json:"title"`
+	ID        int       `json:"id"`
+	Index     int       `json:"index"`
 }
 
 type UserInfo struct {
@@ -171,18 +174,18 @@ type UserInfo struct {
 }
 
 type WorkoutEvent struct {
+	Workout   *Workout  `json:"workout,omitempty"`
 	Type      EventType `json:"type"`
 	ID        string    `json:"id"`
 	DeletedAt string    `json:"deleted_at,omitempty"`
-	Workout   *Workout  `json:"workout,omitempty"`
 }
 
 type ExerciseHistoryEntry struct {
-	WorkoutID          string  `json:"workout_id"`
-	WorkoutTitle       string  `json:"workout_title"`
-	WorkoutStartTime   string  `json:"workout_start_time"`
-	WorkoutEndTime     string  `json:"workout_end_time"`
-	ExerciseTemplateID string  `json:"exercise_template_id"`
+	WorkoutID          string   `json:"workout_id"`
+	WorkoutTitle       string   `json:"workout_title"`
+	WorkoutStartTime   string   `json:"workout_start_time"`
+	WorkoutEndTime     string   `json:"workout_end_time"`
+	ExerciseTemplateID string   `json:"exercise_template_id"`
 	WeightKg           *float64 `json:"weight_kg"`
 	Reps               *int     `json:"reps"`
 	DistanceMeters     *float64 `json:"distance_meters"`
@@ -195,29 +198,29 @@ type ExerciseHistoryEntry struct {
 // --- Request models ---
 
 type WorkoutRequest struct {
-	Title       string                   `json:"title"`
 	Description *string                  `json:"description"`
+	Title       string                   `json:"title"`
 	StartTime   string                   `json:"start_time"`
 	EndTime     string                   `json:"end_time"`
-	IsPrivate   bool                     `json:"is_private"`
 	Exercises   []WorkoutExerciseRequest `json:"exercises"`
+	IsPrivate   bool                     `json:"is_private"`
 }
 
 type WorkoutExerciseRequest struct {
-	ExerciseTemplateID string             `json:"exercise_template_id"`
-	SupersetID         *int               `json:"superset_id,omitempty"`
-	Notes              string             `json:"notes,omitempty"`
+	ExerciseTemplateID string              `json:"exercise_template_id"`
+	SupersetID         *int                `json:"superset_id,omitempty"`
+	Notes              string              `json:"notes,omitempty"`
 	Sets               []WorkoutSetRequest `json:"sets"`
 }
 
 type WorkoutSetRequest struct {
-	Type            SetType  `json:"type"`
 	WeightKg        *float64 `json:"weight_kg,omitempty"`
 	Reps            *int     `json:"reps,omitempty"`
 	DistanceMeters  *int     `json:"distance_meters,omitempty"`
 	DurationSeconds *int     `json:"duration_seconds,omitempty"`
 	CustomMetric    *float64 `json:"custom_metric,omitempty"`
 	RPE             *float64 `json:"rpe,omitempty"`
+	Type            SetType  `json:"type"`
 }
 
 type RoutineRequest struct {
@@ -236,13 +239,14 @@ type RoutineExerciseRequest struct {
 }
 
 type RoutineSetRequest struct {
-	Type            SetType   `json:"type"`
 	WeightKg        *float64  `json:"weight_kg,omitempty"`
 	Reps            *int      `json:"reps,omitempty"`
 	RepRange        *RepRange `json:"rep_range,omitempty"`
 	DistanceMeters  *int      `json:"distance_meters,omitempty"`
 	DurationSeconds *int      `json:"duration_seconds,omitempty"`
 	CustomMetric    *float64  `json:"custom_metric,omitempty"`
+	RPE             *float64  `json:"rpe,omitempty"`
+	Type            SetType   `json:"type"`
 }
 
 type ExerciseTemplateRequest struct {
@@ -260,9 +264,15 @@ type RoutineFolderRequest struct {
 // --- Internal paginated response wrappers ---
 
 type workoutsResponse struct {
+	Workouts  []Workout `json:"workouts"`
 	Page      int       `json:"page"`
 	PageCount int       `json:"page_count"`
-	Workouts  []Workout `json:"workouts"`
+}
+
+type rawWorkoutsResponse struct {
+	Workouts  []json.RawMessage `json:"workouts"`
+	Page      int               `json:"page"`
+	PageCount int               `json:"page_count"`
 }
 
 type workoutCountResponse struct {
@@ -270,15 +280,15 @@ type workoutCountResponse struct {
 }
 
 type workoutEventsResponse struct {
+	Events    []WorkoutEvent `json:"events"`
 	Page      int            `json:"page"`
 	PageCount int            `json:"page_count"`
-	Events    []WorkoutEvent `json:"events"`
 }
 
 type routinesResponse struct {
+	Routines  []Routine `json:"routines"`
 	Page      int       `json:"page"`
 	PageCount int       `json:"page_count"`
-	Routines  []Routine `json:"routines"`
 }
 
 type singleRoutineResponse struct {
@@ -286,15 +296,15 @@ type singleRoutineResponse struct {
 }
 
 type exerciseTemplatesResponse struct {
+	ExerciseTemplates []ExerciseTemplate `json:"exercise_templates"`
 	Page              int                `json:"page"`
 	PageCount         int                `json:"page_count"`
-	ExerciseTemplates []ExerciseTemplate `json:"exercise_templates"`
 }
 
 type routineFoldersResponse struct {
+	RoutineFolders []RoutineFolder `json:"routine_folders"`
 	Page           int             `json:"page"`
 	PageCount      int             `json:"page_count"`
-	RoutineFolders []RoutineFolder `json:"routine_folders"`
 }
 
 type userInfoResponse struct {

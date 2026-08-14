@@ -7,6 +7,10 @@ import (
 	"github.com/verygoodsoftwarenotvirus/hevy-cli"
 )
 
+// emptyBarKg is the weight of a standard Olympic barbell, used for the empty-bar warmup
+// set on lifts with EmptyBarWarmup enabled.
+const emptyBarKg = 20.0
+
 // Syncer updates Hevy routines to reflect the current 5/3/1 program state.
 type Syncer struct {
 	client *hevy.Client
@@ -58,12 +62,27 @@ func (s *Syncer) SyncRoutines(ctx context.Context) error {
 	return nil
 }
 
-
 func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *hevy.RoutineRequest {
 	weekName := WeekName(week)
 	title := fmt.Sprintf("C%dW%d -- %s", s.config.CycleNumber, week, lift.DisplayName())
 
-	sets := CalculateRoutineSets(liftCfg.TrainingMax(), week, liftCfg.UseLbs)
+	sets := CalculateRoutineSets(liftCfg.TrainingMaxKg, week, liftCfg.UseLbs)
+
+	// Warm up with the empty bar before the computed warmup/working sets (major lifts
+	// except the deadlift).
+	if liftCfg.EmptyBarWarmup {
+		emptyBar := CalculatedSet{Type: hevy.SetTypeWarmup, WeightKg: emptyBarKg, Reps: 5}
+		sets = append([]CalculatedSet{emptyBar}, sets...)
+	}
+
+	// Presets that live on the main exercise (FSL) simply extend its set list.
+	assistance := s.config.AssistanceScheme()
+	assistanceSets := CalculateAssistanceSets(assistance, liftCfg.TrainingMaxKg, week, liftCfg.UseLbs)
+	assistanceApplied := false
+	if assistance.InMainExercise() && len(assistanceSets) > 0 {
+		sets = append(sets, assistanceSets...)
+		assistanceApplied = true
+	}
 
 	var routineSets []hevy.RoutineSetRequest
 	for _, cs := range sets {
@@ -72,6 +91,8 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 		// uses rep_range, the plain reps field is ignored on every other set. Since
 		// the AMRAP set needs a range, encode all working sets as ranges (fixed-rep
 		// sets collapse to start == end).
+		// The AMRAP set is encoded as a wide rep range (its minimum up to 20); Hevy's
+		// routine API rejects an rpe field on routine sets, so it isn't set here.
 		repRange := &hevy.RepRange{Start: cs.Reps, End: cs.Reps}
 		if cs.IsAMRAP {
 			repRange.End = 20
@@ -99,29 +120,25 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 		Sets:               routineSets,
 	})
 
-	// BBB assistance: 5×10 at 50% TM, skipped on deload week.
-	if week != 4 && liftCfg.BBBExerciseTemplateID != "" {
-		round := RoundWeight
-		if liftCfg.UseLbs {
-			round = RoundWeightLbs
-		}
-		bbbWeight := round(liftCfg.TrainingMax() * 0.50)
-		bbbRestSeconds := 60
-		var bbbSets []hevy.RoutineSetRequest
-		for range 5 {
-			w := bbbWeight
-			reps := 10
-			bbbSets = append(bbbSets, hevy.RoutineSetRequest{
-				Type:     hevy.SetTypeNormal,
+	// Presets that log against their own exercise (BBB) become an exercise of their own,
+	// placed after the main lift and before the auxiliary work.
+	if assistance == AssistanceBBB && len(assistanceSets) > 0 && liftCfg.BBBExerciseTemplateID != "" {
+		assistanceRestSeconds := 60
+		assistanceRoutineSets := make([]hevy.RoutineSetRequest, 0, len(assistanceSets))
+		for i := range assistanceSets {
+			w, reps := assistanceSets[i].WeightKg, assistanceSets[i].Reps
+			assistanceRoutineSets = append(assistanceRoutineSets, hevy.RoutineSetRequest{
+				Type:     assistanceSets[i].Type,
 				WeightKg: &w,
 				Reps:     &reps,
 			})
 		}
 		exercises = append(exercises, hevy.RoutineExerciseRequest{
 			ExerciseTemplateID: liftCfg.BBBExerciseTemplateID,
-			RestSeconds:        &bbbRestSeconds,
-			Sets:               bbbSets,
+			RestSeconds:        &assistanceRestSeconds,
+			Sets:               assistanceRoutineSets,
 		})
+		assistanceApplied = true
 	}
 
 	for _, aux := range liftCfg.AuxiliaryExercises {
@@ -132,10 +149,15 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 		exercises = append(exercises, auxToExerciseRequest(c))
 	}
 
+	notes := fmt.Sprintf("5/3/1 Cycle %d, %s", s.config.CycleNumber, weekName)
+	if assistanceApplied {
+		notes += fmt.Sprintf(" — %s", assistance.DisplayName())
+	}
+
 	return &hevy.RoutineRequest{
 		Title:     title,
 		FolderID:  s.config.FolderID,
-		Notes:     fmt.Sprintf("5/3/1 Cycle %d, %s", s.config.CycleNumber, weekName),
+		Notes:     notes,
 		Exercises: exercises,
 	}
 }
@@ -166,6 +188,7 @@ func auxToExerciseRequest(aux AuxiliaryExercise) hevy.RoutineExerciseRequest {
 	return hevy.RoutineExerciseRequest{
 		ExerciseTemplateID: aux.ExerciseTemplateID,
 		RestSeconds:        &restSeconds,
+		Notes:              aux.Notes,
 		Sets:               auxSets,
 	}
 }

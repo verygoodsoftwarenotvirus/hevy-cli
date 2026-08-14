@@ -20,6 +20,35 @@ My template repo for Go projects.
 6. Update `CLAUDE.md` with project-specific details
 7. Run `make setup`
 
+## 5/3/1
+
+Each lift in the config stores a **training max** (`training_max_kg`); all working-set,
+warmup, and assistance weights are derived from it. The two commands you'll run regularly:
+
+```bash
+hevy 531 sync               # (re)create all 16 routines (4 lifts × 4 weeks) at the current training maxes
+hevy 531 sync --next-cycle  # advance a cycle: bump training maxes (upper +2.5kg, lower +5kg), then recreate routines in a fresh folder
+```
+
+Typical loop: train the 4-week block (deleting routines as you finish them), then run
+`hevy 531 sync --next-cycle` to get a fresh block with heavier weights.
+
+### Assistance presets
+
+The supplemental volume after the main lift is a preset (`assistance` in the config),
+switchable at any time — the next `hevy 531 sync` rewrites the routines to match:
+
+```bash
+hevy 531 assistance          # show the current preset
+hevy 531 assistance fsl      # First Set Last: 5×5 at the week's first working-set weight
+hevy 531 assistance bbb      # Boring But Big: 5×10 at 50% of the training max
+hevy 531 assistance none     # main lift only
+```
+
+FSL sets are appended to the main lift's own exercise; BBB logs against the separate
+`bbb_exercise_template_id` exercise. No preset adds volume on the deload week. A config
+with no `assistance` key means BBB, which is what these configs did before presets existed.
+
 ## Development
 
 ```bash

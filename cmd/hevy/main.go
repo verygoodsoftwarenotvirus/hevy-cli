@@ -7,13 +7,19 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/verygoodsoftwarenotvirus/hevy-cli"
+	"github.com/verygoodsoftwarenotvirus/hevy-cli/archive"
 	"github.com/verygoodsoftwarenotvirus/hevy-cli/fivethreeone"
 )
+
+// archiveProgressEvery is how many scanned workouts pass between archive progress lines.
+const archiveProgressEvery = 25
 
 func main() {
 	if len(os.Args) < 2 {
@@ -41,6 +47,8 @@ func main() {
 		cmdRoutines(ctx, client, os.Args[2:])
 	case "531":
 		cmd531(ctx, client, os.Args[2:])
+	case "archive":
+		cmdArchive(ctx, apiKey, os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		printUsage()
@@ -58,14 +66,20 @@ Commands:
   exercises get <id>         Get a single exercise template
   workouts list              List recent workouts
   workouts lastweek [-n N]   Print workouts from N weeks ago (default 1, 0 = this week)
+  workouts cyclesofar        Print this 5/3/1 cycle's working weeks so far (excludes deload)
+  workouts lastcycle         Print the previous 5/3/1 cycle's working weeks (excludes deload)
   workouts count             Print total workout count
   workouts get <id>          Get a single workout
   routines list [--folder=T] List routines, optionally filtered by folder title
   routines get <id>          Get a single routine
-  531 init --config=FILE     Set up 5/3/1 program
-  531 sync --config=FILE     Update routines for current week
-  531 advance --config=FILE  Advance to next week/cycle
-  531 status --config=FILE   Print current program status
+  archive --year Y [--out FILE] [--tz ZONE] [--force]
+                             Export a year of workouts to a SQLite file
+  531 init --config=FILE          Set up 5/3/1 program
+  531 sync --config=FILE          Update routines for current week (never changes training maxes)
+  531 status --config=FILE        Print current program status
+  531 tm <lift> (--set N|--by N|--increment)  Set or adjust a lift's training max
+  531 assistance [bbb|fsl|none]   Show or switch the supplemental-volume preset
+  531 fix-exercises --config=FILE Resolve/create warmup & auxiliary exercise templates
 
 Environment:
   HEVY_API_KEY               API key (required, from https://hevy.com/settings?developer)`)
@@ -78,6 +92,74 @@ func cmdUser(ctx context.Context, client *hevy.Client) {
 		os.Exit(1)
 	}
 	fmt.Printf("ID:   %s\nName: %s\nURL:  %s\n", info.ID, info.Name, info.URL)
+}
+
+// cmdArchive exports a calendar year of workouts into a SQLite file.
+//
+// It builds its own client rather than reusing main's, because a full-year scan is long enough that
+// retrying rate limits and transient failures matters.
+func cmdArchive(ctx context.Context, apiKey string, args []string) {
+	fs := flag.NewFlagSet("archive", flag.ExitOnError)
+	year := fs.Int("year", 0, "calendar year to archive (required)")
+	out := fs.String("out", "", "output SQLite file (default: hevy-<year>.db)")
+	tz := fs.String("tz", "", "IANA timezone used to decide which year a workout falls in (default: local)")
+	force := fs.Bool("force", false, "overwrite the output file if it already exists")
+	fs.Parse(args)
+
+	if *year <= 0 {
+		fmt.Fprintln(os.Stderr, "--year is required, e.g. hevy archive --year 2025")
+		os.Exit(1)
+	}
+
+	loc := time.Local //nolint:gosmopolitan // local time is the intended default; --tz overrides it.
+	if *tz != "" {
+		var err error
+		if loc, err = time.LoadLocation(*tz); err != nil {
+			slog.Error("loading timezone", "tz", *tz, "error", err)
+			os.Exit(1)
+		}
+	}
+
+	outPath := *out
+	if outPath == "" {
+		outPath = fmt.Sprintf("hevy-%d.db", *year)
+	}
+
+	// Scanning a year means many sequential API pages, so report progress rather than sit silent.
+	reportedAt := 0
+	progress := func(fetched, kept int) {
+		if fetched-reportedAt < archiveProgressEvery {
+			return
+		}
+		reportedAt = fetched
+		fmt.Fprintf(os.Stderr, "scanned %d workouts, %d in %d...\n", fetched, kept, *year)
+	}
+
+	result, err := archive.Run(ctx, archive.NewClient(apiKey), archive.Options{
+		Location: loc,
+		Out:      outPath,
+		Year:     *year,
+		Force:    *force,
+	}, progress)
+	if err != nil {
+		slog.Error("archiving workouts", "error", err)
+		os.Exit(1)
+	}
+
+	if result.Workouts == 0 {
+		fmt.Printf("No workouts found in %d (scanned %d). Wrote an empty archive to %s\n",
+			*year, result.Fetched, outPath)
+		return
+	}
+
+	fmt.Printf("Archived %d workouts (%d exercises, %d sets) spanning %s to %s into %s\n",
+		result.Workouts, result.Exercises, result.Sets,
+		result.First.Format(time.DateOnly), result.Last.Format(time.DateOnly), outPath)
+	fmt.Printf("Scanned %d workouts in total.\n", result.Fetched)
+
+	if result.OutOfOrder {
+		fmt.Println("Note: the API returned workouts out of start-time order, so the full history was scanned.")
+	}
 }
 
 func cmdExercises(ctx context.Context, client *hevy.Client, args []string) {
@@ -137,7 +219,7 @@ func cmdExercises(ctx context.Context, client *hevy.Client, args []string) {
 
 func cmdWorkouts(ctx context.Context, client *hevy.Client, args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: hevy workouts <list|count|get> [args]")
+		fmt.Fprintln(os.Stderr, "Usage: hevy workouts <list|lastweek|cyclesofar|lastcycle|count|get> [args]")
 		os.Exit(1)
 	}
 
@@ -156,6 +238,10 @@ func cmdWorkouts(ctx context.Context, client *hevy.Client, args []string) {
 		}
 	case "lastweek":
 		cmdWorkoutsLastWeek(ctx, client, args[1:])
+	case "cyclesofar":
+		cmdWorkoutsCycle(ctx, client, args[1:], 0)
+	case "lastcycle":
+		cmdWorkoutsCycle(ctx, client, args[1:], 1)
 	case "count":
 		count, err := client.GetWorkoutCount(ctx)
 		if err != nil {
@@ -175,23 +261,7 @@ func cmdWorkouts(ctx context.Context, client *hevy.Client, args []string) {
 		}
 		fmt.Printf("ID:    %s\nTitle: %s\nDate:  %s — %s\n", w.ID, w.Title,
 			w.StartTime.Format("2006-01-02 15:04"), w.EndTime.Format("15:04"))
-		for _, e := range w.Exercises {
-			fmt.Printf("\n  %s (%s)\n", e.Title, e.ExerciseTemplateID)
-			if e.Notes != "" {
-				fmt.Printf("    Notes: %s\n", e.Notes)
-			}
-			for _, s := range e.Sets {
-				weight := ""
-				if s.WeightKg != nil {
-					weight = fmt.Sprintf("%.1f kg", *s.WeightKg)
-				}
-				reps := ""
-				if s.Reps != nil {
-					reps = fmt.Sprintf("x%d", *s.Reps)
-				}
-				fmt.Printf("    [%s] %s %s\n", s.Type, weight, reps)
-			}
-		}
+		printWorkoutExercises(w.Exercises, true)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown workouts command: %s\n", args[0])
 		os.Exit(1)
@@ -250,28 +320,203 @@ func cmdWorkoutsLastWeek(ctx context.Context, client *hevy.Client, args []string
 	fmt.Printf("%d workout(s)\n", len(collected))
 
 	for _, w := range collected {
-		fmt.Printf("\n%s — %s\n", w.StartTime.Format("Mon 2006-01-02 15:04"), w.Title)
-		for _, e := range w.Exercises {
-			fmt.Printf("\n  %s\n", e.Title)
-			if e.Notes != "" {
-				fmt.Printf("    Notes: %s\n", e.Notes)
-			}
-			for _, s := range e.Sets {
-				weight := ""
-				if s.WeightKg != nil {
-					weight = fmt.Sprintf("%.1f kg", *s.WeightKg)
-				}
-				reps := ""
-				if s.Reps != nil {
-					reps = fmt.Sprintf("x%d", *s.Reps)
-				}
-				rpe := ""
-				if s.RPE != nil {
-					rpe = fmt.Sprintf("  @RPE %.1f", *s.RPE)
-				}
-				fmt.Printf("    [%s] %s %s%s\n", s.Type, weight, reps, rpe)
-			}
+		printWorkoutDetail(w)
+	}
+}
+
+// setDetail is the printable view of a set from either a workout or a routine. Both API
+// types carry the same measurements — only routines have rep ranges, and only logged
+// workouts have an RPE — so one renderer covers every printout.
+type setDetail struct {
+	WeightKg        *float64
+	Reps            *int
+	RepRange        *hevy.RepRange
+	DurationSeconds *int
+	DistanceMeters  *float64
+	RPE             *float64
+	Type            hevy.SetType
+}
+
+func workoutSetDetail(s *hevy.WorkoutSet) setDetail {
+	return setDetail{
+		Type:            s.Type,
+		WeightKg:        s.WeightKg,
+		Reps:            s.Reps,
+		DurationSeconds: s.DurationSeconds,
+		DistanceMeters:  s.DistanceMeters,
+		RPE:             s.RPE,
+	}
+}
+
+func routineSetDetail(s *hevy.RoutineSet) setDetail {
+	return setDetail{
+		Type:            s.Type,
+		WeightKg:        s.WeightKg,
+		Reps:            s.Reps,
+		RepRange:        s.RepRange,
+		DurationSeconds: s.DurationSeconds,
+		DistanceMeters:  s.DistanceMeters,
+		RPE:             s.RPE,
+	}
+}
+
+// String renders a set as an indented line, e.g. "    [normal] 60.0 kg x5 @RPE 8.0".
+// Only the measurements the set actually carries are printed, so duration-based work
+// (dead hangs, planks) shows its time instead of reps it will never have.
+func (d setDetail) String() string {
+	parts := []string{fmt.Sprintf("[%s]", d.Type)}
+	if d.WeightKg != nil {
+		parts = append(parts, fmt.Sprintf("%.1f kg", *d.WeightKg))
+	}
+	if d.Reps != nil {
+		parts = append(parts, fmt.Sprintf("x%d", *d.Reps))
+	}
+	if d.RepRange != nil {
+		if d.RepRange.Start == d.RepRange.End {
+			parts = append(parts, fmt.Sprintf("x%d", d.RepRange.Start))
+		} else {
+			parts = append(parts, fmt.Sprintf("x%d-%d", d.RepRange.Start, d.RepRange.End))
 		}
+	}
+	if d.DistanceMeters != nil {
+		parts = append(parts, fmt.Sprintf("%s m", strconv.FormatFloat(*d.DistanceMeters, 'f', -1, 64)))
+	}
+	if d.DurationSeconds != nil {
+		parts = append(parts, formatDuration(*d.DurationSeconds))
+	}
+	if d.RPE != nil {
+		parts = append(parts, fmt.Sprintf("@RPE %.1f", *d.RPE))
+	}
+	return "    " + strings.Join(parts, " ")
+}
+
+// formatDuration renders a set's duration as "45s", "1m", or "1m 30s".
+func formatDuration(seconds int) string {
+	if seconds < 60 {
+		return fmt.Sprintf("%ds", seconds)
+	}
+	minutes, remainder := seconds/60, seconds%60
+	if remainder == 0 {
+		return fmt.Sprintf("%dm", minutes)
+	}
+	return fmt.Sprintf("%dm %ds", minutes, remainder)
+}
+
+// printWorkoutDetail prints a workout's exercises and sets.
+func printWorkoutDetail(w hevy.Workout) {
+	fmt.Printf("\n%s — %s\n", w.StartTime.Format("Mon 2006-01-02 15:04"), w.Title)
+	printWorkoutExercises(w.Exercises, false)
+}
+
+// printWorkoutExercises prints each logged exercise with its notes and sets.
+func printWorkoutExercises(exercises []hevy.WorkoutExercise, showTemplateIDs bool) {
+	for _, e := range exercises {
+		if showTemplateIDs {
+			fmt.Printf("\n  %s (%s)\n", e.Title, e.ExerciseTemplateID)
+		} else {
+			fmt.Printf("\n  %s\n", e.Title)
+		}
+		if e.Notes != "" {
+			fmt.Printf("    Notes: %s\n", e.Notes)
+		}
+		for i := range e.Sets {
+			fmt.Println(workoutSetDetail(&e.Sets[i]))
+		}
+	}
+}
+
+// printRoutineExercises prints each planned exercise with its notes and sets.
+func printRoutineExercises(exercises []hevy.RoutineExercise, showTemplateIDs bool) {
+	for _, e := range exercises {
+		if showTemplateIDs {
+			fmt.Printf("\n  %s (%s)\n", e.Title, e.ExerciseTemplateID)
+		} else {
+			fmt.Printf("\n  %s\n", e.Title)
+		}
+		if e.Notes != "" {
+			fmt.Printf("    Notes: %s\n", e.Notes)
+		}
+		for i := range e.Sets {
+			fmt.Println(routineSetDetail(&e.Sets[i]))
+		}
+	}
+}
+
+// cycleTitleRE matches 5/3/1 workout titles like "C3W1 -- Squat", capturing the
+// cycle number and the week number within that cycle.
+var cycleTitleRE = regexp.MustCompile(`^C(\d+)W(\d+)`)
+
+// cmdWorkoutsCycle prints the working-week (non-deload) workouts of a 5/3/1
+// cycle, identified purely from workout titles (C<cycle>W<week>). cyclesAgo is 0
+// for the current cycle ("cyclesofar") and 1 for the previous one ("lastcycle").
+func cmdWorkoutsCycle(ctx context.Context, client *hevy.Client, args []string, cyclesAgo int) {
+	name := "cyclesofar"
+	if cyclesAgo > 0 {
+		name = "lastcycle"
+	}
+	fs := flag.NewFlagSet("workouts "+name, flag.ExitOnError)
+	includeDeload := fs.Bool("include-deload", false, "include the deload week (week 4)")
+	fs.Parse(args)
+
+	// Hevy returns workouts newest-first. The first title we can parse fixes the
+	// current cycle; the target cycle is that minus cyclesAgo. Cycle numbers only
+	// ever increase over time, so once we see an older cycle we're done.
+	targetCycle := -1
+	var collected []hevy.Workout
+	for w, err := range client.ListWorkouts(ctx) {
+		if err != nil {
+			slog.Error("listing workouts", "error", err)
+			os.Exit(1)
+		}
+		m := cycleTitleRE.FindStringSubmatch(w.Title)
+		if m == nil {
+			continue
+		}
+		cyc, _ := strconv.Atoi(m[1])
+		wk, _ := strconv.Atoi(m[2])
+
+		if targetCycle == -1 {
+			targetCycle = cyc - cyclesAgo
+		}
+		if cyc > targetCycle {
+			continue // a newer cycle than the one we want (only happens for lastcycle)
+		}
+		if cyc < targetCycle {
+			break // reached an older cycle; everything below is older still
+		}
+		if wk >= fivethreeone.DeloadWeek && !*includeDeload {
+			continue // skip deload
+		}
+		collected = append(collected, w)
+	}
+
+	if targetCycle < 1 {
+		if cyclesAgo > 0 {
+			fmt.Println("No previous cycle found.")
+		} else {
+			fmt.Println("No 5/3/1 workouts found (titles like \"C3W1\").")
+		}
+		return
+	}
+
+	sort.Slice(collected, func(i, j int) bool {
+		return collected[i].StartTime.Before(collected[j].StartTime)
+	})
+
+	scope := "through today"
+	if cyclesAgo > 0 {
+		scope = "(previous cycle)"
+	}
+	fmt.Printf("Cycle %d %s\n", targetCycle, scope)
+
+	if len(collected) == 0 {
+		fmt.Println("No working-week workouts logged for this cycle.")
+		return
+	}
+
+	fmt.Printf("%d workout(s)\n", len(collected))
+	for _, w := range collected {
+		printWorkoutDetail(w)
 	}
 }
 
@@ -295,24 +540,7 @@ func cmdRoutines(ctx context.Context, client *hevy.Client, args []string) {
 			os.Exit(1)
 		}
 		fmt.Printf("ID:    %s\nTitle: %s\nNotes: %s\n", r.ID, r.Title, r.Notes)
-		for _, e := range r.Exercises {
-			fmt.Printf("\n  %s (%s)\n", e.Title, e.ExerciseTemplateID)
-			for _, s := range e.Sets {
-				weight := ""
-				if s.WeightKg != nil {
-					weight = fmt.Sprintf("%.1f kg", *s.WeightKg)
-				}
-				reps := ""
-				if s.Reps != nil {
-					reps = fmt.Sprintf("x%d", *s.Reps)
-				}
-				repRange := ""
-				if s.RepRange != nil {
-					repRange = fmt.Sprintf("x%d-%d", s.RepRange.Start, s.RepRange.End)
-				}
-				fmt.Printf("    [%s] %s %s%s\n", s.Type, weight, reps, repRange)
-			}
-		}
+		printRoutineExercises(r.Exercises, true)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown routines command: %s\n", args[0])
 		os.Exit(1)
@@ -378,37 +606,13 @@ func cmdRoutinesList(ctx context.Context, client *hevy.Client, args []string) {
 		if r.Notes != "" {
 			fmt.Printf("  Notes: %s\n", r.Notes)
 		}
-		for _, e := range r.Exercises {
-			fmt.Printf("\n  %s\n", e.Title)
-			if e.Notes != "" {
-				fmt.Printf("    Notes: %s\n", e.Notes)
-			}
-			for _, s := range e.Sets {
-				weight := ""
-				if s.WeightKg != nil {
-					weight = fmt.Sprintf("%.1f kg", *s.WeightKg)
-				}
-				reps := ""
-				if s.Reps != nil {
-					reps = fmt.Sprintf("x%d", *s.Reps)
-				}
-				repRange := ""
-				if s.RepRange != nil {
-					repRange = fmt.Sprintf("x%d-%d", s.RepRange.Start, s.RepRange.End)
-				}
-				rpe := ""
-				if s.RPE != nil {
-					rpe = fmt.Sprintf("  @RPE %.1f", *s.RPE)
-				}
-				fmt.Printf("    [%s] %s %s%s%s\n", s.Type, weight, reps, repRange, rpe)
-			}
-		}
+		printRoutineExercises(r.Exercises, false)
 	}
 }
 
 func cmd531(ctx context.Context, client *hevy.Client, args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: hevy 531 <init|sync|status|fix-exercises> --config=FILE")
+		fmt.Fprintln(os.Stderr, "Usage: hevy 531 <init|sync|status|tm|assistance|fix-exercises> --config=FILE")
 		os.Exit(1)
 	}
 
@@ -419,8 +623,12 @@ func cmd531(ctx context.Context, client *hevy.Client, args []string) {
 		cmd531Sync(ctx, client, args[1:])
 	case "status":
 		cmd531Status(args[1:])
+	case "tm":
+		cmd531TM(args[1:])
 	case "fix-exercises":
 		cmd531FixExercises(ctx, client, args[1:])
+	case "assistance":
+		cmd531Assistance(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown 531 command: %s\n", args[0])
 		os.Exit(1)
@@ -438,7 +646,6 @@ func cmd531Init(ctx context.Context, client *hevy.Client, args []string) {
 	cfg := &fivethreeone.Config{
 		Lifts:       make(map[fivethreeone.Lift]fivethreeone.LiftConfig),
 		CycleNumber: 1,
-		WeekNumber:  1,
 		RoutineIDs:  make(map[fivethreeone.Lift]map[int]string),
 	}
 
@@ -455,16 +662,16 @@ func cmd531Init(ctx context.Context, client *hevy.Client, args []string) {
 		}
 		fmt.Printf("%s — found exercise templates\n", lift.DisplayName())
 
-		fmt.Printf("1-rep max for %s (kg): ", lift.DisplayName())
+		fmt.Printf("training max for %s (kg): ", lift.DisplayName())
 		scanner.Scan()
-		var orm float64
-		if _, err := fmt.Sscanf(scanner.Text(), "%f", &orm); err != nil {
-			slog.Error("invalid 1-rep max", "lift", lift.DisplayName(), "error", err)
+		var tm float64
+		if _, err := fmt.Sscanf(scanner.Text(), "%f", &tm); err != nil {
+			slog.Error("invalid training max", "lift", lift.DisplayName(), "error", err)
 			os.Exit(1)
 		}
 
 		cfg.Lifts[lift] = fivethreeone.LiftConfig{
-			OneRepMaxKg:           orm,
+			TrainingMaxKg:         tm,
 			ExerciseTemplateID:    templateID,
 			BBBExerciseTemplateID: bbbTemplateID,
 		}
@@ -510,7 +717,7 @@ func create531Folder(ctx context.Context, client *hevy.Client, cycleNumber int) 
 func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
 	fs := flag.NewFlagSet("531 sync", flag.ExitOnError)
 	configPath := fs.String("config", "531.json", "path to 5/3/1 config file")
-	nextCycle := fs.Bool("next-cycle", false, "increment cycle number and create fresh routines (update training maxes in the config first)")
+	nextCycle := fs.Bool("next-cycle", false, "advance to the next cycle: create a fresh routine folder and routines (training maxes are left untouched — use 'hevy 531 tm' to change them)")
 	fs.Parse(args)
 
 	cfg, err := fivethreeone.LoadConfig(*configPath)
@@ -542,7 +749,7 @@ func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Routines synced for Cycle %d, %s\n", cfg.CycleNumber, fivethreeone.WeekName(cfg.WeekNumber))
+	fmt.Printf("Routines synced for Cycle %d\n", cfg.CycleNumber)
 }
 
 func cmd531FixExercises(ctx context.Context, client *hevy.Client, args []string) {
@@ -580,27 +787,169 @@ func cmd531Status(args []string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Cycle:  %d\nWeek:   %d (%s)\n\n", cfg.CycleNumber, cfg.WeekNumber, fivethreeone.WeekName(cfg.WeekNumber))
+	assistance := cfg.AssistanceScheme()
+	fmt.Printf("Cycle:      %d\nAssistance: %s\n\n", cfg.CycleNumber, assistance.DisplayName())
 
 	for _, lift := range fivethreeone.AllLifts() {
 		lc, ok := cfg.Lifts[lift]
 		if !ok {
 			continue
 		}
-		fmt.Printf("%-16s 1RM: %.1f kg  TM: %.1f kg", lift.DisplayName(), lc.OneRepMaxKg, lc.TrainingMax())
+		fmt.Printf("%-16s TM: %.1f kg", lift.DisplayName(), lc.TrainingMaxKg)
 		if weeks, exists := cfg.RoutineIDs[lift]; exists {
 			fmt.Printf("  (%d routines configured)", len(weeks))
 		}
 		fmt.Println()
 
-		sets := fivethreeone.CalculateRoutineSets(lc.TrainingMax(), cfg.WeekNumber, lc.UseLbs)
-		for _, s := range sets {
-			amrap := ""
-			if s.IsAMRAP {
-				amrap = "+"
+		for week := 1; week <= fivethreeone.DeloadWeek; week++ {
+			fmt.Printf("  %s:\n", fivethreeone.WeekName(week))
+			sets := fivethreeone.CalculateRoutineSets(lc.TrainingMaxKg, week, lc.UseLbs)
+			for _, s := range sets {
+				amrap := ""
+				if s.IsAMRAP {
+					amrap = "+"
+				}
+				fmt.Printf("    [%s] %.1f kg x%d%s\n", s.Type, s.WeightKg, s.Reps, amrap)
 			}
-			fmt.Printf("  [%s] %.1f kg x%d%s\n", s.Type, s.WeightKg, s.Reps, amrap)
+			// Assistance sets are identical to one another, so print them as a count.
+			if as := fivethreeone.CalculateAssistanceSets(assistance, lc.TrainingMaxKg, week, lc.UseLbs); len(as) > 0 {
+				fmt.Printf("    [%s] %.1f kg x%d  (%d sets, %s)\n",
+					as[0].Type, as[0].WeightKg, as[0].Reps, len(as), strings.ToUpper(string(assistance)))
+			}
 		}
 		fmt.Println()
 	}
+}
+
+// cmd531Assistance switches the program's supplemental-volume preset. The change only
+// reaches Hevy on the next 'hevy 531 sync'.
+func cmd531Assistance(args []string) {
+	fs := flag.NewFlagSet("531 assistance", flag.ExitOnError)
+	configPath := fs.String("config", "531.json", "path to 5/3/1 config file")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: hevy 531 assistance [bbb|fsl|none] [--config=FILE]")
+		fs.PrintDefaults()
+	}
+
+	// The preset is an optional positional argument that comes first; the stdlib flag
+	// package stops parsing at the first positional, so pull it off before the flags.
+	preset := ""
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		preset, args = args[0], args[1:]
+	}
+	fs.Parse(args)
+
+	cfg, err := fivethreeone.LoadConfig(*configPath)
+	if err != nil {
+		slog.Error("loading config", "error", err)
+		os.Exit(1)
+	}
+
+	// No preset named: report the current one rather than changing anything.
+	if preset == "" {
+		fmt.Printf("Assistance: %s\n", cfg.AssistanceScheme().DisplayName())
+		return
+	}
+
+	scheme, ok := fivethreeone.ParseAssistanceScheme(preset)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "unknown assistance preset: %q (want one of bbb, fsl, none)\n", preset)
+		os.Exit(1)
+	}
+
+	old := cfg.AssistanceScheme()
+	cfg.Assistance = scheme
+
+	if err := fivethreeone.SaveConfig(*configPath, cfg); err != nil {
+		slog.Error("saving config", "error", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Assistance: %s → %s\n", old.DisplayName(), scheme.DisplayName())
+	fmt.Println("Run 'hevy 531 sync' to push the updated routines to Hevy.")
+}
+
+// cmd531TM sets or adjusts the training max of a single lift. This is the only
+// command that mutates a training max; routine planning ('531 sync') never
+// touches it.
+func cmd531TM(args []string) {
+	fs := flag.NewFlagSet("531 tm", flag.ExitOnError)
+	configPath := fs.String("config", "531.json", "path to 5/3/1 config file")
+	set := fs.Float64("set", -1, "set the training max to this many kg")
+	by := fs.Float64("by", 0, "adjust the training max by this many kg (may be negative)")
+	increment := fs.Bool("increment", false, "bump the training max by the standard 5/3/1 amount (upper +2.5kg, lower +5kg)")
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr, "Usage: hevy 531 tm <squat|bench_press|overhead_press|deadlift> (--set N | --by N | --increment) [--config=FILE]")
+		fs.PrintDefaults()
+	}
+
+	// The lift is a required positional argument that comes first; the stdlib
+	// flag package stops parsing at the first positional, so pull it off before
+	// parsing the remaining flags.
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		fs.Usage()
+		os.Exit(1)
+	}
+	liftArg := args[0]
+	fs.Parse(args[1:])
+
+	lift, ok := fivethreeone.ParseLift(liftArg)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "unknown lift: %q (want one of squat, bench_press, overhead_press, deadlift)\n", liftArg)
+		os.Exit(1)
+	}
+
+	// Exactly one of --set, --by, or --increment must be provided.
+	modes := 0
+	if *set >= 0 {
+		modes++
+	}
+	if *by != 0 {
+		modes++
+	}
+	if *increment {
+		modes++
+	}
+	if modes != 1 {
+		fmt.Fprintln(os.Stderr, "specify exactly one of --set, --by, or --increment")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	cfg, err := fivethreeone.LoadConfig(*configPath)
+	if err != nil {
+		slog.Error("loading config", "error", err)
+		os.Exit(1)
+	}
+
+	lc, ok := cfg.Lifts[lift]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "%s is not configured in %s — run 'hevy 531 init' first\n", lift.DisplayName(), *configPath)
+		os.Exit(1)
+	}
+
+	old := lc.TrainingMaxKg
+	switch {
+	case *set >= 0:
+		lc.TrainingMaxKg = *set
+	case *increment:
+		lc.TrainingMaxKg += lift.TMIncrementKg()
+	default:
+		lc.TrainingMaxKg += *by
+	}
+
+	if lc.TrainingMaxKg < 0 {
+		fmt.Fprintf(os.Stderr, "resulting training max would be negative (%.1f kg)\n", lc.TrainingMaxKg)
+		os.Exit(1)
+	}
+
+	cfg.Lifts[lift] = lc
+
+	if err := fivethreeone.SaveConfig(*configPath, cfg); err != nil {
+		slog.Error("saving config", "error", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("%s — training max %.1f kg → %.1f kg\n", lift.DisplayName(), old, lc.TrainingMaxKg)
+	fmt.Println("Run 'hevy 531 sync' to push the updated routines to Hevy.")
 }

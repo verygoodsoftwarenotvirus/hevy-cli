@@ -2,6 +2,7 @@ package hevy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"iter"
 	"net/http"
@@ -27,6 +28,23 @@ func (c *Client) ListWorkouts(ctx context.Context) iter.Seq2[Workout, error] {
 		params.Set("pageSize", "10")
 
 		var resp workoutsResponse
+		if err := c.doJSON(ctx, http.MethodGet, "/v1/workouts?"+params.Encode(), nil, &resp); err != nil {
+			return nil, 0, err
+		}
+		return resp.Workouts, resp.PageCount, nil
+	})
+}
+
+// ListWorkoutsRaw returns an iterator over the raw JSON of every workout, handling pagination
+// automatically. Unlike ListWorkouts it preserves fields the Workout struct does not model, which
+// matters when the response is being persisted rather than rendered.
+func (c *Client) ListWorkoutsRaw(ctx context.Context) iter.Seq2[json.RawMessage, error] {
+	return fetchAllPages(ctx, func(ctx context.Context, page int) ([]json.RawMessage, int, error) {
+		params := url.Values{}
+		params.Set("page", strconv.Itoa(page))
+		params.Set("pageSize", "10")
+
+		var resp rawWorkoutsResponse
 		if err := c.doJSON(ctx, http.MethodGet, "/v1/workouts?"+params.Encode(), nil, &resp); err != nil {
 			return nil, 0, err
 		}
