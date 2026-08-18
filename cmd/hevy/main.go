@@ -78,7 +78,8 @@ Commands:
   531 sync --config=FILE          Update routines for current week (never changes training maxes)
   531 status --config=FILE        Print current program status
   531 tm <lift> (--set N|--by N|--increment)  Set or adjust a lift's training max
-  531 assistance [bbb|fsl|none]   Show or switch the supplemental-volume preset
+  531 assistance [bbb|fsl|fsl-paused|none] [--lift=LIFT] [--clear]
+                                  Show or switch the supplemental-volume preset
   531 fix-exercises --config=FILE Resolve/create warmup & auxiliary exercise templates
 
 Environment:
@@ -787,14 +788,15 @@ func cmd531Status(args []string) {
 		os.Exit(1)
 	}
 
-	assistance := cfg.AssistanceScheme()
-	fmt.Printf("Cycle:      %d\nAssistance: %s\n\n", cfg.CycleNumber, assistance.DisplayName())
+	fmt.Printf("Cycle:      %d\nAssistance: %s\n\n", cfg.CycleNumber, cfg.AssistanceScheme().DisplayName())
 
 	for _, lift := range fivethreeone.AllLifts() {
 		lc, ok := cfg.Lifts[lift]
 		if !ok {
 			continue
 		}
+		assistance := cfg.AssistanceSchemeFor(lift)
+
 		fmt.Printf("%-16s TM: %.1f kg", lift.DisplayName(), lc.TrainingMaxKg)
 		if weeks, exists := cfg.RoutineIDs[lift]; exists {
 			fmt.Printf("  (%d routines configured)", len(weeks))
@@ -812,22 +814,30 @@ func cmd531Status(args []string) {
 				fmt.Printf("    [%s] %.1f kg x%d%s\n", s.Type, s.WeightKg, s.Reps, amrap)
 			}
 			// Assistance sets are identical to one another, so print them as a count.
-			if as := fivethreeone.CalculateAssistanceSets(assistance, lc.TrainingMaxKg, week, lc.UseLbs); len(as) > 0 {
+			if as := fivethreeone.CalculateAssistanceSets(lift, assistance, lc.TrainingMaxKg, week, lc.UseLbs); len(as) > 0 {
+				label := strings.ToUpper(string(assistance))
+				if cue := assistance.Cue(); cue != "" {
+					label += ", " + cue
+				}
 				fmt.Printf("    [%s] %.1f kg x%d  (%d sets, %s)\n",
-					as[0].Type, as[0].WeightKg, as[0].Reps, len(as), strings.ToUpper(string(assistance)))
+					as[0].Type, as[0].WeightKg, as[0].Reps, len(as), label)
 			}
 		}
 		fmt.Println()
 	}
 }
 
-// cmd531Assistance switches the program's supplemental-volume preset. The change only
-// reaches Hevy on the next 'hevy 531 sync'.
+// cmd531Assistance switches the supplemental-volume preset, for the whole program or —
+// with --lift — for a single lift, which is how one lift runs a variant (paused FSL, say)
+// without the program committing to it. The change only reaches Hevy on the next
+// 'hevy 531 sync'.
 func cmd531Assistance(args []string) {
 	fs := flag.NewFlagSet("531 assistance", flag.ExitOnError)
 	configPath := fs.String("config", "531.json", "path to 5/3/1 config file")
+	liftName := fs.String("lift", "", "apply to this lift alone instead of the whole program")
+	clearOverride := fs.Bool("clear", false, "with --lift, drop that lift's override so it follows the program preset again")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "Usage: hevy 531 assistance [bbb|fsl|none] [--config=FILE]")
+		fmt.Fprintln(os.Stderr, "Usage: hevy 531 assistance [bbb|fsl|fsl-paused|none] [--lift=LIFT] [--clear] [--config=FILE]")
 		fs.PrintDefaults()
 	}
 
@@ -839,22 +849,37 @@ func cmd531Assistance(args []string) {
 	}
 	fs.Parse(args)
 
+	// An empty scheme means no preset was named, i.e. show rather than switch.
+	var scheme fivethreeone.AssistanceScheme
+	if preset != "" {
+		parsed, ok := fivethreeone.ParseAssistanceScheme(preset)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "unknown assistance preset: %q (want one of bbb, fsl, fsl-paused, none)\n", preset)
+			os.Exit(1)
+		}
+		scheme = parsed
+	}
+
 	cfg, err := fivethreeone.LoadConfig(*configPath)
 	if err != nil {
 		slog.Error("loading config", "error", err)
 		os.Exit(1)
 	}
 
-	// No preset named: report the current one rather than changing anything.
-	if preset == "" {
-		fmt.Printf("Assistance: %s\n", cfg.AssistanceScheme().DisplayName())
+	if *liftName != "" {
+		cmd531AssistanceLift(cfg, *configPath, *liftName, scheme, *clearOverride)
 		return
 	}
-
-	scheme, ok := fivethreeone.ParseAssistanceScheme(preset)
-	if !ok {
-		fmt.Fprintf(os.Stderr, "unknown assistance preset: %q (want one of bbb, fsl, none)\n", preset)
+	if *clearOverride {
+		fmt.Fprintln(os.Stderr, "--clear only applies together with --lift")
 		os.Exit(1)
+	}
+
+	// No preset named: report the current one rather than changing anything.
+	if scheme == "" {
+		fmt.Printf("Assistance: %s\n", cfg.AssistanceScheme().DisplayName())
+		printAssistanceOverrides(cfg)
+		return
 	}
 
 	old := cfg.AssistanceScheme()
@@ -866,7 +891,63 @@ func cmd531Assistance(args []string) {
 	}
 
 	fmt.Printf("Assistance: %s → %s\n", old.DisplayName(), scheme.DisplayName())
+	printAssistanceOverrides(cfg)
 	fmt.Println("Run 'hevy 531 sync' to push the updated routines to Hevy.")
+}
+
+// cmd531AssistanceLift handles the --lift form: showing, setting, or clearing one lift's
+// override of the program-wide preset.
+func cmd531AssistanceLift(cfg *fivethreeone.Config, configPath, liftName string, scheme fivethreeone.AssistanceScheme, clearOverride bool) {
+	lift, ok := fivethreeone.ParseLift(liftName)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "unknown lift: %q\n", liftName)
+		os.Exit(1)
+	}
+	liftCfg, ok := cfg.Lifts[lift]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "lift %s is not in the config\n", lift.DisplayName())
+		os.Exit(1)
+	}
+
+	old := cfg.AssistanceSchemeFor(lift)
+
+	switch {
+	case clearOverride:
+		liftCfg.Assistance = ""
+	case scheme == "":
+		// Nothing to change: report what this lift is doing and why.
+		source := "program preset"
+		if liftCfg.Assistance != "" {
+			source = "lift override"
+		}
+		fmt.Printf("%s assistance: %s (%s)\n", lift.DisplayName(), old.DisplayNameFor(lift), source)
+		return
+	default:
+		liftCfg.Assistance = scheme
+	}
+
+	cfg.Lifts[lift] = liftCfg
+	if err := fivethreeone.SaveConfig(configPath, cfg); err != nil {
+		slog.Error("saving config", "error", err)
+		os.Exit(1)
+	}
+
+	now := cfg.AssistanceSchemeFor(lift)
+	fmt.Printf("%s assistance: %s → %s\n", lift.DisplayName(), old.DisplayNameFor(lift), now.DisplayNameFor(lift))
+	if liftCfg.Assistance == "" {
+		fmt.Printf("%s now follows the program preset.\n", lift.DisplayName())
+	}
+	fmt.Println("Run 'hevy 531 sync' to push the updated routines to Hevy.")
+}
+
+// printAssistanceOverrides lists the lifts running something other than the program-wide
+// preset, so a program-level report never hides a per-lift override.
+func printAssistanceOverrides(cfg *fivethreeone.Config) {
+	for _, lift := range fivethreeone.AllLifts() {
+		if liftCfg, ok := cfg.Lifts[lift]; ok && liftCfg.Assistance != "" {
+			fmt.Printf("  %s overrides: %s\n", lift.DisplayName(), liftCfg.Assistance.DisplayNameFor(lift))
+		}
+	}
 }
 
 // cmd531TM sets or adjusts the training max of a single lift. This is the only

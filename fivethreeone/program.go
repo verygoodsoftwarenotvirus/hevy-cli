@@ -66,7 +66,14 @@ const (
 	AssistanceBBB AssistanceScheme = "bbb"
 	// AssistanceFSL is First Set Last: 5×5 at the week's first working-set weight,
 	// appended to the main lift's own sets rather than split into its own exercise.
+	// The deadlift runs fewer sets than the rest — see Lift.FSLSetCount.
 	AssistanceFSL AssistanceScheme = "fsl"
+	// AssistanceFSLPaused is First Set Last with a pause at the bottom of each rep,
+	// run at a reduced fraction of the FSL weight (pausedFSLFactor) to keep the
+	// slower, harder reps manageable. Intended as a temporary technique correction:
+	// set it per-lift with LiftConfig.Assistance and drop the key to go back to
+	// plain FSL.
+	AssistanceFSLPaused AssistanceScheme = "fsl-paused"
 	// AssistanceNone runs the main lift with no supplemental volume at all.
 	AssistanceNone AssistanceScheme = "none"
 )
@@ -83,6 +90,8 @@ func ParseAssistanceScheme(s string) (AssistanceScheme, bool) {
 		return AssistanceBBB, true
 	case "fsl", "first set last", "first-set-last":
 		return AssistanceFSL, true
+	case "fsl-paused", "fsl_paused", "paused", "paused fsl", "paused-fsl", "pfsl":
+		return AssistanceFSLPaused, true
 	case "none", "off", "":
 		return AssistanceNone, true
 	default:
@@ -97,6 +106,8 @@ func (a AssistanceScheme) DisplayName() string {
 		return "Boring But Big (5×10 @ 50% TM)"
 	case AssistanceFSL:
 		return "First Set Last (5×5 @ first working set)"
+	case AssistanceFSLPaused:
+		return "Paused First Set Last (5×5 @ 90% of FSL)"
 	case AssistanceNone:
 		return "None"
 	default:
@@ -104,10 +115,37 @@ func (a AssistanceScheme) DisplayName() string {
 	}
 }
 
+// DisplayNameFor is DisplayName specialized to one lift, so presets whose shape varies
+// by lift (the FSL family, where the deadlift runs fewer sets) describe what that lift
+// actually does. Used where the name accompanies a single lift's sets; DisplayName
+// remains the program-wide description.
+func (a AssistanceScheme) DisplayNameFor(lift Lift) string {
+	switch a {
+	case AssistanceFSL:
+		return fmt.Sprintf("First Set Last (%d×%d @ first working set)", lift.FSLSetCount(), fslReps)
+	case AssistanceFSLPaused:
+		return fmt.Sprintf("Paused First Set Last (%d×%d @ %d%% of FSL, %s)",
+			lift.FSLSetCount(), fslReps, int(pausedFSLFactor*100), a.Cue())
+	default:
+		return a.DisplayName()
+	}
+}
+
 // InMainExercise reports whether the preset's sets belong on the main lift's exercise
 // rather than in a separate one.
 func (a AssistanceScheme) InMainExercise() bool {
-	return a == AssistanceFSL
+	return a == AssistanceFSL || a == AssistanceFSLPaused
+}
+
+// Cue returns the per-exercise form cue this preset's sets are performed with, or an
+// empty string for presets that need no cue. Hevy's routine API carries notes on the
+// exercise rather than the set (see hevy.RoutineSetRequest), so this is surfaced on the
+// exercise the preset's sets are logged against.
+func (a AssistanceScheme) Cue() string {
+	if a == AssistanceFSLPaused {
+		return fmt.Sprintf("%ds pause at the bottom", pausedFSLPauseSeconds)
+	}
+	return ""
 }
 
 const (
@@ -115,8 +153,16 @@ const (
 	bbbReps       = 10
 	bbbPercentage = 0.50
 
-	fslSetCount = 5
-	fslReps     = 5
+	fslSetCount         = 5
+	fslDeadliftSetCount = 3
+	fslReps             = 5
+
+	// pausedFSLFactor scales the FSL weight for AssistanceFSLPaused. It is applied to
+	// the rounded FSL weight — not the raw percentage — so the paused weight is always
+	// visibly derived from the FSL weight printed alongside it.
+	pausedFSLFactor = 0.90
+	// pausedFSLPauseSeconds is how long the pause at the bottom of each rep is held.
+	pausedFSLPauseSeconds = 2
 )
 
 // WeekName returns the display name for a given week number.
@@ -193,8 +239,9 @@ func CalculateRoutineSets(trainingMaxKg float64, week int, useLbs bool) []Calcul
 
 // CalculateAssistanceSets computes the supplemental sets that follow the working sets for
 // the given preset. Deload week gets none, whichever preset is configured — the point of
-// the week is the reduced volume.
-func CalculateAssistanceSets(scheme AssistanceScheme, trainingMaxKg float64, week int, useLbs bool) []CalculatedSet {
+// the week is the reduced volume. The lift is needed because the FSL family varies its
+// set count by lift (see Lift.FSLSetCount).
+func CalculateAssistanceSets(lift Lift, scheme AssistanceScheme, trainingMaxKg float64, week int, useLbs bool) []CalculatedSet {
 	weekScheme, ok := weekSchemes[week]
 	if !ok || week == DeloadWeek {
 		return nil
@@ -207,11 +254,18 @@ func CalculateAssistanceSets(scheme AssistanceScheme, trainingMaxKg float64, wee
 	switch scheme {
 	case AssistanceBBB:
 		count, reps, weight = bbbSetCount, bbbReps, round(trainingMaxKg*bbbPercentage)
-	case AssistanceFSL:
+	case AssistanceFSL, AssistanceFSLPaused:
 		if len(weekScheme.Sets) == 0 {
 			return nil
 		}
-		count, reps, weight = fslSetCount, fslReps, round(trainingMaxKg*weekScheme.Sets[0].Percentage)
+		// The FSL weight is the week's first working set, rounded exactly as that set
+		// is. The paused variant then scales that already-rounded weight, so it stays a
+		// visible fraction of the FSL number rather than drifting off the raw percentage.
+		count, reps = lift.FSLSetCount(), fslReps
+		weight = round(trainingMaxKg * weekScheme.Sets[0].Percentage)
+		if scheme == AssistanceFSLPaused {
+			weight = round(weight * pausedFSLFactor)
+		}
 	case AssistanceNone:
 		return nil
 	default:

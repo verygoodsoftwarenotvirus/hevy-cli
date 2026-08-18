@@ -97,6 +97,16 @@ func (l Lift) IsUpperBody() bool {
 	return l == BenchPress || l == OverheadPress
 }
 
+// FSLSetCount returns how many First Set Last supplemental sets this lift runs. The
+// deadlift is capped below the others: its FSL sets sit on top of a lift that already
+// taxes recovery hardest, so it takes fewer of them.
+func (l Lift) FSLSetCount() int {
+	if l == Deadlift {
+		return fslDeadliftSetCount
+	}
+	return fslSetCount
+}
+
 // TMIncrementKg returns the standard 5/3/1 training-max increase applied when
 // advancing to the next cycle: 2.5 kg for upper-body lifts (bench, overhead
 // press) and 5 kg for lower-body lifts (squat, deadlift).
@@ -135,12 +145,18 @@ type LiftConfig struct {
 	// BBBExerciseTemplateID is the separate exercise the BBB preset logs its sets against.
 	// It is kept even while another preset is selected, so switching back to BBB doesn't
 	// require re-resolving it.
-	BBBExerciseTemplateID string              `json:"bbb_exercise_template_id"`
-	Warmup                []AuxiliaryExercise `json:"warmup,omitempty"`
-	AuxiliaryExercises    []AuxiliaryExercise `json:"auxiliary_exercises,omitempty"`
-	Cooldown              []AuxiliaryExercise `json:"cooldown,omitempty"`
-	TrainingMaxKg         float64             `json:"training_max_kg"`
-	UseLbs                bool                `json:"use_lbs,omitempty"`
+	BBBExerciseTemplateID string `json:"bbb_exercise_template_id"`
+	// Assistance overrides the program-wide supplemental preset for this lift alone. An
+	// empty value inherits Config.Assistance; set it with 'hevy 531 assistance <preset>
+	// --lift=<lift>' and clear it with --clear. This is how a single lift runs something
+	// different (e.g. paused FSL on the squat while everything else runs plain FSL)
+	// without the program committing to it.
+	Assistance         AssistanceScheme    `json:"assistance,omitempty"`
+	Warmup             []AuxiliaryExercise `json:"warmup,omitempty"`
+	AuxiliaryExercises []AuxiliaryExercise `json:"auxiliary_exercises,omitempty"`
+	Cooldown           []AuxiliaryExercise `json:"cooldown,omitempty"`
+	TrainingMaxKg      float64             `json:"training_max_kg"`
+	UseLbs             bool                `json:"use_lbs,omitempty"`
 	// EmptyBarWarmup prepends an empty-barbell warmup set to the main lift's working
 	// sets. Enabled for the major lifts except the deadlift.
 	EmptyBarWarmup bool `json:"empty_bar_warmup,omitempty"`
@@ -165,6 +181,15 @@ func (c *Config) AssistanceScheme() AssistanceScheme {
 		return DefaultAssistanceScheme
 	}
 	return c.Assistance
+}
+
+// AssistanceSchemeFor returns the supplemental preset in effect for one lift: the lift's
+// own override when it has one, and the program-wide preset otherwise.
+func (c *Config) AssistanceSchemeFor(lift Lift) AssistanceScheme {
+	if liftCfg, ok := c.Lifts[lift]; ok && liftCfg.Assistance != "" {
+		return liftCfg.Assistance
+	}
+	return c.AssistanceScheme()
 }
 
 // LoadConfig reads a Config from a JSON file.

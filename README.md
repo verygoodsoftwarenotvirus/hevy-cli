@@ -39,7 +39,7 @@ The supplemental volume after the main lift is a preset (`assistance` in the con
 switchable at any time — the next `hevy 531 sync` rewrites the routines to match:
 
 ```bash
-hevy 531 assistance          # show the current preset
+hevy 531 assistance          # show the current preset (and any per-lift overrides)
 hevy 531 assistance fsl      # First Set Last: 5×5 at the week's first working-set weight
 hevy 531 assistance bbb      # Boring But Big: 5×10 at 50% of the training max
 hevy 531 assistance none     # main lift only
@@ -48,6 +48,27 @@ hevy 531 assistance none     # main lift only
 FSL sets are appended to the main lift's own exercise; BBB logs against the separate
 `bbb_exercise_template_id` exercise. No preset adds volume on the deload week. A config
 with no `assistance` key means BBB, which is what these configs did before presets existed.
+
+FSL reps stay at 5 whatever the week's main rep scheme is, and the **deadlift runs 3 sets
+instead of 5** — its supplemental work sits on top of the lift that taxes recovery hardest.
+
+### Per-lift overrides
+
+One lift can run a different preset from the rest of the program, which is how a temporary
+variant stays temporary:
+
+```bash
+hevy 531 assistance fsl-paused --lift=squat   # squat only: paused FSL
+hevy 531 assistance --lift=squat              # what is this lift doing, and why
+hevy 531 assistance --lift=squat --clear      # back to the program preset
+```
+
+`fsl-paused` is FSL at 90% of the FSL weight — taken from the rounded FSL weight, so the
+paused number is always a visible fraction of the FSL number printed beside it — with a
+2-second pause at the bottom of each rep. The pause rides along as a note on the exercise
+the sets are logged against (Hevy's routine API has no per-set notes field) and in the
+routine's own notes. An override lives in the lift's `assistance` key; `--clear` removes
+the key, and nothing else has to be undone.
 
 ## Development
 

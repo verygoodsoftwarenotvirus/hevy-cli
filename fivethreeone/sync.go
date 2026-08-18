@@ -75,9 +75,9 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 		sets = append([]CalculatedSet{emptyBar}, sets...)
 	}
 
-	// Presets that live on the main exercise (FSL) simply extend its set list.
-	assistance := s.config.AssistanceScheme()
-	assistanceSets := CalculateAssistanceSets(assistance, liftCfg.TrainingMaxKg, week, liftCfg.UseLbs)
+	// Presets that live on the main exercise (the FSL family) simply extend its set list.
+	assistance := s.config.AssistanceSchemeFor(lift)
+	assistanceSets := CalculateAssistanceSets(lift, assistance, liftCfg.TrainingMaxKg, week, liftCfg.UseLbs)
 	assistanceApplied := false
 	if assistance.InMainExercise() && len(assistanceSets) > 0 {
 		sets = append(sets, assistanceSets...)
@@ -113,10 +113,20 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 		exercises = append(exercises, auxToExerciseRequest(w))
 	}
 
+	// A preset carrying a form cue (paused FSL) puts it on the exercise its sets are
+	// logged against — Hevy's routine sets have no notes field of their own.
+	mainNotes := ""
+	if assistanceApplied && assistance.InMainExercise() {
+		if cue := assistance.Cue(); cue != "" {
+			mainNotes = fmt.Sprintf("Last %d sets: %s", len(assistanceSets), cue)
+		}
+	}
+
 	mainRestSeconds := 150
 	exercises = append(exercises, hevy.RoutineExerciseRequest{
 		ExerciseTemplateID: liftCfg.ExerciseTemplateID,
 		RestSeconds:        &mainRestSeconds,
+		Notes:              mainNotes,
 		Sets:               routineSets,
 	})
 
@@ -151,7 +161,7 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 
 	notes := fmt.Sprintf("5/3/1 Cycle %d, %s", s.config.CycleNumber, weekName)
 	if assistanceApplied {
-		notes += fmt.Sprintf(" — %s", assistance.DisplayName())
+		notes += fmt.Sprintf(" — %s", assistance.DisplayNameFor(lift))
 	}
 
 	return &hevy.RoutineRequest{
