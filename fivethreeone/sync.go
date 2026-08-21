@@ -175,18 +175,19 @@ func (s *Syncer) buildRoutineRequest(lift Lift, liftCfg LiftConfig, week int) *h
 const defaultAuxRestSeconds = 120
 
 func auxToExerciseRequest(aux AuxiliaryExercise) hevy.RoutineExerciseRequest {
-	auxSets := make([]hevy.RoutineSetRequest, 0, aux.Sets)
-	for range aux.Sets {
+	prescribed := aux.PrescribedSets()
+	auxSets := make([]hevy.RoutineSetRequest, 0, len(prescribed))
+	for _, p := range prescribed {
 		rs := hevy.RoutineSetRequest{Type: hevy.SetTypeNormal}
-		if aux.DurationSeconds != nil {
-			d := *aux.DurationSeconds
+		if p.DurationSeconds != nil {
+			d := *p.DurationSeconds
 			rs.DurationSeconds = &d
 		} else {
-			reps := aux.Reps
+			reps := p.Reps
 			rs.Reps = &reps
 		}
-		if aux.WeightKg != nil {
-			w := *aux.WeightKg
+		if p.WeightKg != nil {
+			w := *p.WeightKg
 			rs.WeightKg = &w
 		}
 		auxSets = append(auxSets, rs)

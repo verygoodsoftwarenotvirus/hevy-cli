@@ -117,9 +117,23 @@ func (l Lift) TMIncrementKg() float64 {
 	return 5.0
 }
 
+// AuxiliarySet prescribes one set of an auxiliary exercise, so a movement can ramp load
+// and reps across its sets instead of repeating one prescription. Empty fields fall back
+// to the parent AuxiliaryExercise's WeightKg, Reps, and DurationSeconds, which keeps a
+// scheme that only varies weight from having to restate the reps on every rung.
+type AuxiliarySet struct {
+	DurationSeconds *int     `json:"duration_seconds,omitempty"`
+	WeightKg        *float64 `json:"weight_kg,omitempty"`
+	Reps            int      `json:"reps,omitempty"`
+}
+
 // AuxiliaryExercise describes a user-supplied accessory movement appended to a lift's
 // routine on every week (including deload). Either Reps or DurationSeconds should be set.
 // Weight, rest, and notes are optional.
+//
+// SetScheme prescribes each set individually and, when present, replaces Sets/Reps/WeightKg
+// as the source of the exercise's sets. Use it for ramped accessories (ascending weight,
+// descending reps); leave it empty for the common case of N identical sets.
 //
 // When ExerciseTemplateID is empty, 'hevy 531 fix-exercises' resolves it from Name: it
 // looks the title up in the Hevy library and, if it isn't found and ExerciseType is set,
@@ -135,8 +149,41 @@ type AuxiliaryExercise struct {
 	EquipmentCategory  hevy.EquipmentCategory `json:"equipment_category,omitempty"`
 	MuscleGroup        hevy.MuscleGroup       `json:"muscle_group,omitempty"`
 	OtherMuscles       []hevy.MuscleGroup     `json:"other_muscles,omitempty"`
+	SetScheme          []AuxiliarySet         `json:"set_scheme,omitempty"`
 	Sets               int                    `json:"sets"`
 	Reps               int                    `json:"reps,omitempty"`
+}
+
+// PrescribedSets returns the exercise's sets as a SetScheme, expanding the Sets/Reps/WeightKg
+// shorthand into one entry per set when no explicit scheme is configured. Callers that need
+// to reason about individual sets can then treat both spellings the same way.
+func (a *AuxiliaryExercise) PrescribedSets() []AuxiliarySet {
+	if len(a.SetScheme) > 0 {
+		scheme := make([]AuxiliarySet, len(a.SetScheme))
+		for i, s := range a.SetScheme {
+			if s.WeightKg == nil {
+				s.WeightKg = a.WeightKg
+			}
+			if s.DurationSeconds == nil {
+				s.DurationSeconds = a.DurationSeconds
+			}
+			if s.Reps == 0 {
+				s.Reps = a.Reps
+			}
+			scheme[i] = s
+		}
+		return scheme
+	}
+
+	scheme := make([]AuxiliarySet, 0, a.Sets)
+	for range a.Sets {
+		scheme = append(scheme, AuxiliarySet{
+			DurationSeconds: a.DurationSeconds,
+			WeightKg:        a.WeightKg,
+			Reps:            a.Reps,
+		})
+	}
+	return scheme
 }
 
 // LiftConfig holds the training max and exercise template IDs for one lift.
