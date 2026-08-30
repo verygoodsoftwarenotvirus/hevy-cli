@@ -16,6 +16,7 @@ import (
 	"github.com/verygoodsoftwarenotvirus/hevy-cli"
 	"github.com/verygoodsoftwarenotvirus/hevy-cli/archive"
 	"github.com/verygoodsoftwarenotvirus/hevy-cli/fivethreeone"
+	"github.com/verygoodsoftwarenotvirus/hevy-cli/strongimport"
 )
 
 // archiveProgressEvery is how many scanned workouts pass between archive progress lines.
@@ -49,6 +50,12 @@ func main() {
 		cmd531(ctx, client, os.Args[2:])
 	case "archive":
 		cmdArchive(ctx, apiKey, os.Args[2:])
+	case "fix-durations":
+		cmdFixDurations(ctx, client, os.Args[2:])
+	case "restore-durations":
+		cmdRestoreDurations(ctx, client, os.Args[2:])
+	case "fill-durations":
+		cmdFillDurations(ctx, client, os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n", os.Args[1])
 		printUsage()
@@ -74,6 +81,15 @@ Commands:
   routines get <id>          Get a single routine
   archive --year Y [--out FILE] [--tz ZONE] [--force]
                              Export a year of workouts to a SQLite file
+  fix-durations [--apply] [--limit N]
+                             Clear the workout-length durations the Strong import
+                             stamped onto every set (dry run unless --apply)
+  restore-durations --csv FILE [--apply]
+                             Restore the real per-set times from a Strong CSV
+                             export (dry run unless --apply)
+  fill-durations --set NAME=SECS [--set ...] [--apply]
+                             Fill blank timed sets with an estimate, noting on
+                             each exercise that it is one (dry run unless --apply)
   531 init --config=FILE          Set up 5/3/1 program
   531 sync --config=FILE          Update routines for current week (never changes training maxes)
   531 status --config=FILE        Print current program status
@@ -1033,4 +1049,339 @@ func cmd531TM(args []string) {
 
 	fmt.Printf("%s — training max %.1f kg → %.1f kg\n", lift.DisplayName(), old, lc.TrainingMaxKg)
 	fmt.Println("Run 'hevy 531 sync' to push the updated routines to Hevy.")
+}
+
+// cmdFixDurations clears the durations the Strong import stamped onto every set.
+//
+// It is a dry run by default. Hevy's update endpoint replaces a workout wholesale, so a mistake
+// here is a mistake in the user's training history, and the scan is cheap enough to always run
+// first.
+func cmdFixDurations(ctx context.Context, client *hevy.Client, args []string) {
+	fs := flag.NewFlagSet("fix-durations", flag.ExitOnError)
+	apply := fs.Bool("apply", false, "write the repairs (default: report what would change and stop)")
+	limit := fs.Int("limit", 0, "repair at most N workouts, oldest first (0 = no limit)")
+	verbose := fs.Bool("v", false, "list every affected workout, not just the ones Hevy displays")
+	// The API never returns is_private, but the update endpoint always sets it, so the value has to
+	// be supplied rather than preserved. Defaulting to false matches a default Hevy account; anyone
+	// whose history is private must say so or the repair would publish it.
+	private := fs.Bool("private", false, "mark repaired workouts private (the API cannot read back the current setting)")
+	fs.Parse(args)
+
+	lookup, err := strongimport.LookupFromTemplates(ctx, client)
+	if err != nil {
+		slog.Error("loading exercise templates", "error", err)
+		os.Exit(1)
+	}
+
+	report, err := strongimport.Scan(ctx, client, lookup)
+	if err != nil {
+		slog.Error("scanning workouts", "error", err)
+		os.Exit(1)
+	}
+
+	findings := report.Findings
+	sort.Slice(findings, func(i, j int) bool { return findings[i].Start.Before(findings[j].Start) })
+
+	fmt.Printf("Scanned %d workouts.\n", report.Scanned)
+	if len(findings) == 0 {
+		fmt.Println("No stamped durations found.")
+		return
+	}
+
+	fmt.Printf("Found %d workouts (%d sets) carrying the workout's own length as a set duration.\n",
+		len(findings), report.Sets())
+	fmt.Printf("%d of them show a bogus time in the Hevy UI:\n\n", report.Visible())
+
+	for i := range findings {
+		f := &findings[i]
+		if len(f.VisibleExercises) == 0 && !*verbose {
+			continue
+		}
+		fmt.Printf("  %s  %-28s %8s on %d sets", f.Start.Local().Format("2006-01-02 15:04"), f.Title,
+			formatDuration(f.StampedSeconds), f.Sets)
+		if len(f.VisibleExercises) > 0 {
+			fmt.Printf("  <- shown on %s", strings.Join(f.VisibleExercises, ", "))
+		}
+		fmt.Println()
+	}
+
+	if *limit > 0 && *limit < len(findings) {
+		findings = findings[:*limit]
+	}
+
+	if !*apply {
+		fmt.Printf("\nDry run. Re-run with --apply to clear the duration on %d sets across %d workouts.\n",
+			report.Sets(), len(report.Findings))
+		return
+	}
+
+	fmt.Printf("\nRepairing %d workouts...\n", len(findings))
+
+	var repaired int
+	for i := range findings {
+		f := &findings[i]
+
+		// Re-read each workout immediately before writing it. The list response is a snapshot, and
+		// the update endpoint replaces the whole workout, so writing a stale copy would discard any
+		// edit made since the scan began.
+		current, getErr := client.GetWorkout(ctx, f.WorkoutID)
+		if getErr != nil {
+			slog.Error("re-reading workout", "id", f.WorkoutID, "error", getErr)
+			os.Exit(1)
+		}
+
+		if _, still := strongimport.Detect(current, lookup); !still {
+			fmt.Printf("  skipped %s (%s): no longer damaged\n", f.Start.Format("2006-01-02"), f.Title)
+			continue
+		}
+
+		current.IsPrivate = *private
+
+		req, repairErr := strongimport.Repair(current)
+		if repairErr != nil {
+			slog.Error("building repair", "id", f.WorkoutID, "error", repairErr)
+			os.Exit(1)
+		}
+
+		if _, updateErr := client.UpdateWorkout(ctx, f.WorkoutID, req); updateErr != nil {
+			slog.Error("updating workout", "id", f.WorkoutID, "error", updateErr)
+			os.Exit(1)
+		}
+
+		repaired++
+		fmt.Printf("  [%d/%d] %s  %s\n", repaired, len(findings), f.Start.Format("2006-01-02"), f.Title)
+	}
+
+	fmt.Printf("Repaired %d workouts.\n", repaired)
+}
+
+// cmdRestoreDurations writes the per-set times from a Strong export back over the blanks the import
+// left behind. It is the only path that recovers the real numbers rather than approximating them.
+func cmdRestoreDurations(ctx context.Context, client *hevy.Client, args []string) {
+	fs := flag.NewFlagSet("restore-durations", flag.ExitOnError)
+	csvPath := fs.String("csv", "", "path to a Strong CSV export (required)")
+	apply := fs.Bool("apply", false, "write the restorations (default: report what would change and stop)")
+	private := fs.Bool("private", false, "mark rewritten workouts private (the API cannot read back the current setting)")
+	fs.Parse(args)
+
+	if *csvPath == "" {
+		fmt.Fprintln(os.Stderr, "--csv is required, e.g. hevy restore-durations --csv strong.csv")
+		os.Exit(1)
+	}
+
+	f, err := os.Open(*csvPath)
+	if err != nil {
+		slog.Error("opening Strong export", "path", *csvPath, "error", err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	strong, err := strongimport.ParseStrong(f)
+	if err != nil {
+		slog.Error("parsing Strong export", "error", err)
+		os.Exit(1)
+	}
+
+	workouts, err := hevy.Collect(client.ListWorkouts(ctx))
+	if err != nil {
+		slog.Error("listing workouts", "error", err)
+		os.Exit(1)
+	}
+
+	plan, err := strongimport.BuildRestorePlan(strong, workouts)
+	if err != nil {
+		slog.Error("matching the export against the Hevy history", "error", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Read %d timed workouts from %s; matched against %d Hevy workouts at UTC%+d.\n",
+		len(strong), *csvPath, len(workouts), int(plan.Offset.Hours()))
+	fmt.Printf("Recoverable: %d sets across %d exercises.\n\n", plan.Sets(), len(plan.Restorations))
+
+	for i := range plan.Restorations {
+		r := &plan.Restorations[i]
+		fmt.Printf("  %s  %-30s %-18s %v\n", r.Start.Local().Format("2006-01-02"), r.Title, r.Exercise, r.Seconds)
+	}
+
+	if len(plan.Unmatched) > 0 {
+		fmt.Printf("\nCould not resolve (left untouched):\n")
+		for _, u := range plan.Unmatched {
+			fmt.Printf("  %s\n", u)
+		}
+	}
+
+	if !*apply {
+		fmt.Printf("\nDry run. Re-run with --apply to write %d recovered times.\n", plan.Sets())
+		return
+	}
+
+	byWorkout := map[string][]strongimport.Restoration{}
+	var order []string
+	for i := range plan.Restorations {
+		id := plan.Restorations[i].WorkoutID
+		if _, seen := byWorkout[id]; !seen {
+			order = append(order, id)
+		}
+		byWorkout[id] = append(byWorkout[id], plan.Restorations[i])
+	}
+
+	fmt.Printf("\nRestoring %d workouts...\n", len(order))
+
+	for n, id := range order {
+		current, getErr := client.GetWorkout(ctx, id)
+		if getErr != nil {
+			slog.Error("re-reading workout", "id", id, "error", getErr)
+			os.Exit(1)
+		}
+		current.IsPrivate = *private
+
+		req, buildErr := strongimport.ApplyRestorations(current, byWorkout[id])
+		if buildErr != nil {
+			slog.Error("building restoration", "id", id, "error", buildErr)
+			os.Exit(1)
+		}
+
+		if _, updateErr := client.UpdateWorkout(ctx, id, req); updateErr != nil {
+			slog.Error("updating workout", "id", id, "error", updateErr)
+			os.Exit(1)
+		}
+
+		fmt.Printf("  [%d/%d] %s  %s\n", n+1, len(order), current.StartTime.Local().Format("2006-01-02"), current.Title)
+	}
+
+	fmt.Printf("Restored %d sets across %d workouts.\n", plan.Sets(), len(order))
+}
+
+// fillFlag collects repeated --set NAME=SECONDS arguments.
+type fillFlag map[string]int
+
+func (f fillFlag) String() string { return "" }
+
+func (f fillFlag) Set(v string) error {
+	name, seconds, ok := strings.Cut(v, "=")
+	if !ok {
+		return fmt.Errorf("expected NAME=SECONDS, got %q", v)
+	}
+
+	parsed, err := strconv.Atoi(strings.TrimSpace(seconds))
+	if err != nil {
+		return fmt.Errorf("parsing seconds in %q: %w", v, err)
+	}
+	if parsed <= 0 {
+		return fmt.Errorf("seconds in %q must be positive", v)
+	}
+
+	f[strings.TrimSpace(name)] = parsed
+
+	return nil
+}
+
+// cmdFillDurations writes an estimated duration into sets whose real value is unrecoverable.
+//
+// This is the last resort of the three duration commands, and the only one that writes a number
+// nobody measured. It exists because Hevy renders a blank timed set as 0:00, which claims the set
+// took no time at all; an estimate carrying a note saying it is an estimate is the closer of the
+// two available lies to the truth.
+func cmdFillDurations(ctx context.Context, client *hevy.Client, args []string) {
+	fs := flag.NewFlagSet("fill-durations", flag.ExitOnError)
+	fills := fillFlag{}
+	fs.Var(fills, "set", "NAME=SECONDS to write into that exercise's blank sets (repeatable)")
+	note := fs.String("note", strongimport.DefaultFillNote, "note recorded on every filled exercise; empty to skip")
+	apply := fs.Bool("apply", false, "write the fills (default: report what would change and stop)")
+	private := fs.Bool("private", false, "mark rewritten workouts private (the API cannot read back the current setting)")
+	fs.Parse(args)
+
+	lookup, err := strongimport.LookupFromTemplates(ctx, client)
+	if err != nil {
+		slog.Error("loading exercise templates", "error", err)
+		os.Exit(1)
+	}
+
+	workouts, err := hevy.Collect(client.ListWorkouts(ctx))
+	if err != nil {
+		slog.Error("listing workouts", "error", err)
+		os.Exit(1)
+	}
+
+	gaps := strongimport.FindGaps(workouts, lookup)
+	if len(gaps) == 0 {
+		fmt.Println("No blank timed sets found.")
+		return
+	}
+
+	covered := map[string][]strongimport.Gap{}
+	var skipped []strongimport.Gap
+	for _, g := range gaps {
+		if _, ok := fills[g.Exercise]; ok {
+			covered[g.WorkoutID] = append(covered[g.WorkoutID], g)
+		} else {
+			skipped = append(skipped, g)
+		}
+	}
+
+	var plannedSets int
+	for _, gs := range covered {
+		for _, g := range gs {
+			plannedSets += g.Blank
+		}
+	}
+
+	fmt.Printf("Found %d exercises with blank timed sets.\n\n", len(gaps))
+	for _, g := range gaps {
+		if seconds, ok := fills[g.Exercise]; ok {
+			fmt.Printf("  %s  %-30s %-14s %d sets -> %ds each\n", g.LocalDate, g.Title, g.Exercise, g.Blank, seconds)
+		}
+	}
+
+	if len(skipped) > 0 {
+		fmt.Printf("\nNo --set value given, left blank:\n")
+		for _, g := range skipped {
+			fmt.Printf("  %s  %-30s %-14s %d sets\n", g.LocalDate, g.Title, g.Exercise, g.Blank)
+		}
+	}
+
+	if plannedSets == 0 {
+		fmt.Println("\nNothing to fill. Pass --set NAME=SECONDS for the exercises listed above.")
+		return
+	}
+
+	if !*apply {
+		fmt.Printf("\nDry run. Re-run with --apply to write %d estimated sets across %d workouts.\n",
+			plannedSets, len(covered))
+		return
+	}
+
+	ids := make([]string, 0, len(covered))
+	for id := range covered {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return covered[ids[i]][0].LocalDate < covered[ids[j]][0].LocalDate })
+
+	fmt.Printf("\nFilling %d workouts...\n", len(ids))
+
+	var wrote int
+	for n, id := range ids {
+		current, getErr := client.GetWorkout(ctx, id)
+		if getErr != nil {
+			slog.Error("re-reading workout", "id", id, "error", getErr)
+			os.Exit(1)
+		}
+		current.IsPrivate = *private
+
+		req, filled, fillErr := strongimport.ApplyFills(current, fills, *note)
+		if fillErr != nil {
+			slog.Error("building fill", "id", id, "error", fillErr)
+			os.Exit(1)
+		}
+
+		if _, updateErr := client.UpdateWorkout(ctx, id, req); updateErr != nil {
+			slog.Error("updating workout", "id", id, "error", updateErr)
+			os.Exit(1)
+		}
+
+		wrote += filled
+		fmt.Printf("  [%d/%d] %s  %-30s %d sets\n", n+1, len(ids), covered[id][0].LocalDate, current.Title, filled)
+	}
+
+	fmt.Printf("Filled %d sets across %d workouts.\n", wrote, len(ids))
 }
