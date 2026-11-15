@@ -73,6 +73,9 @@ Commands:
   exercises get <id>         Get a single exercise template
   workouts list              List recent workouts
   workouts lastweek [-n N]   Print workouts from N weeks ago (default 1, 0 = this week)
+  workouts recent [--weeks N] [--current]
+                             Print the last N completed weeks of workouts, grouped by
+                             week (default 8; --current adds this week so far)
   workouts cyclesofar        Print this 5/3/1 cycle's working weeks so far (excludes deload)
   workouts lastcycle         Print the previous 5/3/1 cycle's working weeks (excludes deload)
   workouts count             Print total workout count
@@ -92,6 +95,7 @@ Commands:
                              each exercise that it is one (dry run unless --apply)
   531 init --config=FILE          Set up 5/3/1 program
   531 sync --config=FILE          Update routines for current week (never changes training maxes)
+  531 sync --dry-run              Print the routines sync would send, without changing anything
   531 status --config=FILE        Print current program status
   531 tm <lift> (--set N|--by N|--increment)  Set or adjust a lift's training max
   531 assistance [bbb|fsl|fsl-paused|none] [--lift=LIFT] [--clear]
@@ -236,7 +240,7 @@ func cmdExercises(ctx context.Context, client *hevy.Client, args []string) {
 
 func cmdWorkouts(ctx context.Context, client *hevy.Client, args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: hevy workouts <list|lastweek|cyclesofar|lastcycle|count|get> [args]")
+		fmt.Fprintln(os.Stderr, "Usage: hevy workouts <list|lastweek|recent|cyclesofar|lastcycle|count|get> [args]")
 		os.Exit(1)
 	}
 
@@ -255,6 +259,8 @@ func cmdWorkouts(ctx context.Context, client *hevy.Client, args []string) {
 		}
 	case "lastweek":
 		cmdWorkoutsLastWeek(ctx, client, args[1:])
+	case "recent":
+		cmdWorkoutsRecent(ctx, client, args[1:])
 	case "cyclesofar":
 		cmdWorkoutsCycle(ctx, client, args[1:], 0)
 	case "lastcycle":
@@ -295,17 +301,57 @@ func cmdWorkoutsLastWeek(ctx context.Context, client *hevy.Client, args []string
 		os.Exit(1)
 	}
 
-	// Compute Monday 00:00 local time of the target week (ISO week, Mon start).
+	start := weekStart(time.Now(), *n)
+	printWeek(start, workoutsBetween(ctx, client, start, start.AddDate(0, 0, 7)))
+}
+
+func cmdWorkoutsRecent(ctx context.Context, client *hevy.Client, args []string) {
+	fs := flag.NewFlagSet("workouts recent", flag.ExitOnError)
+	weeks := fs.Int("weeks", 8, "number of completed weeks to print")
+	current := fs.Bool("current", false, "also print the current week so far")
+	fs.Parse(args)
+
+	if *weeks < 1 {
+		fmt.Fprintln(os.Stderr, "--weeks must be >= 1")
+		os.Exit(1)
+	}
+
 	now := time.Now()
+	start := weekStart(now, *weeks)
+	end := weekStart(now, 0)
+	if *current {
+		end = end.AddDate(0, 0, 7)
+	}
+
+	// One fetch for the whole window, then bucket by week, so the API is walked only once.
+	workouts := workoutsBetween(ctx, client, start, end)
+	for ws := start; ws.Before(end); ws = ws.AddDate(0, 0, 7) {
+		we := ws.AddDate(0, 0, 7)
+		var inWeek []hevy.Workout
+		for i := range workouts {
+			if !workouts[i].StartTime.Before(ws) && workouts[i].StartTime.Before(we) {
+				inWeek = append(inWeek, workouts[i])
+			}
+		}
+		printWeek(ws, inWeek)
+		fmt.Println()
+	}
+}
+
+// weekStart returns Monday 00:00 local time of the week weeksAgo weeks before now's
+// (ISO week, Mon start; 0 = now's week).
+func weekStart(now time.Time, weeksAgo int) time.Time {
 	wd := int(now.Weekday()) // Sunday = 0 .. Saturday = 6
 	if wd == 0 {
 		wd = 7
 	}
 	daysFromMonday := wd - 1
 	thisMonday := time.Date(now.Year(), now.Month(), now.Day()-daysFromMonday, 0, 0, 0, 0, now.Location())
-	start := thisMonday.AddDate(0, 0, -7*(*n))
-	end := start.AddDate(0, 0, 7)
+	return thisMonday.AddDate(0, 0, -7*weeksAgo)
+}
 
+// workoutsBetween returns the workouts that started in [start, end), oldest first.
+func workoutsBetween(ctx context.Context, client *hevy.Client, start, end time.Time) []hevy.Workout {
 	var collected []hevy.Workout
 	for w, err := range client.ListWorkouts(ctx) {
 		if err != nil {
@@ -324,19 +370,23 @@ func cmdWorkoutsLastWeek(ctx context.Context, client *hevy.Client, args []string
 	sort.Slice(collected, func(i, j int) bool {
 		return collected[i].StartTime.Before(collected[j].StartTime)
 	})
+	return collected
+}
 
+// printWeek prints a week header followed by that week's workouts.
+func printWeek(start time.Time, workouts []hevy.Workout) {
 	fmt.Printf("Week of %s — %s\n",
 		start.Format("Mon 2006-01-02"),
 		start.AddDate(0, 0, 6).Format("Mon 2006-01-02"))
 
-	if len(collected) == 0 {
+	if len(workouts) == 0 {
 		fmt.Println("No workouts logged in this week.")
 		return
 	}
 
-	fmt.Printf("%d workout(s)\n", len(collected))
+	fmt.Printf("%d workout(s)\n", len(workouts))
 
-	for _, w := range collected {
+	for _, w := range workouts {
 		printWorkoutDetail(w)
 	}
 }
@@ -442,13 +492,18 @@ func printWorkoutExercises(exercises []hevy.WorkoutExercise, showTemplateIDs boo
 	}
 }
 
-// printRoutineExercises prints each planned exercise with its notes and sets.
+// printRoutineExercises prints each planned exercise with its superset partners, notes,
+// and sets.
 func printRoutineExercises(exercises []hevy.RoutineExercise, showTemplateIDs bool) {
-	for _, e := range exercises {
+	for i := range exercises {
+		e := &exercises[i]
 		if showTemplateIDs {
 			fmt.Printf("\n  %s (%s)\n", e.Title, e.ExerciseTemplateID)
 		} else {
 			fmt.Printf("\n  %s\n", e.Title)
+		}
+		if partners := supersetPartners(exercises, i); len(partners) > 0 {
+			fmt.Printf("    Superset with %s\n", strings.Join(partners, " + "))
 		}
 		if e.Notes != "" {
 			fmt.Printf("    Notes: %s\n", e.Notes)
@@ -457,6 +512,22 @@ func printRoutineExercises(exercises []hevy.RoutineExercise, showTemplateIDs boo
 			fmt.Println(routineSetDetail(&e.Sets[i]))
 		}
 	}
+}
+
+// supersetPartners returns the titles of the other exercises in exercises[i]'s superset,
+// in routine order, or nil when it isn't in one.
+func supersetPartners(exercises []hevy.RoutineExercise, i int) []string {
+	id := exercises[i].SupersetID
+	if id == nil {
+		return nil
+	}
+	var partners []string
+	for j := range exercises {
+		if j != i && exercises[j].SupersetID != nil && *exercises[j].SupersetID == *id {
+			partners = append(partners, exercises[j].Title)
+		}
+	}
+	return partners
 }
 
 // cycleTitleRE matches 5/3/1 workout titles like "C3W1 -- Squat", capturing the
@@ -735,6 +806,7 @@ func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
 	fs := flag.NewFlagSet("531 sync", flag.ExitOnError)
 	configPath := fs.String("config", "531.json", "path to 5/3/1 config file")
 	nextCycle := fs.Bool("next-cycle", false, "advance to the next cycle: create a fresh routine folder and routines (training maxes are left untouched — use 'hevy 531 tm' to change them)")
+	dryRun := fs.Bool("dry-run", false, "print the routines sync would send, without changing Hevy or the config")
 	fs.Parse(args)
 
 	cfg, err := fivethreeone.LoadConfig(*configPath)
@@ -743,9 +815,18 @@ func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
 		os.Exit(1)
 	}
 
+	if *dryRun {
+		if *nextCycle {
+			cfg.CycleNumber++
+		}
+		print531Plan(ctx, client, cfg)
+		return
+	}
+
 	if *nextCycle {
 		cfg.CycleNumber++
 		cfg.RoutineIDs = nil
+		cfg.CustomRoutineIDs = nil
 		folderID, err := create531Folder(ctx, client, cfg.CycleNumber)
 		if err != nil {
 			slog.Error("creating folder", "error", err)
@@ -767,6 +848,76 @@ func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
 	}
 
 	fmt.Printf("Routines synced for Cycle %d\n", cfg.CycleNumber)
+}
+
+// print531Plan prints the routines 'hevy 531 sync' would send, in the same layout as
+// 'hevy routines list --folder', so a plan can be reviewed before it reaches Hevy. The
+// only API traffic is a read of the exercise library, to show exercise titles.
+func print531Plan(ctx context.Context, client *hevy.Client, cfg *fivethreeone.Config) {
+	titles := make(map[string]string)
+	for t, err := range client.ListExerciseTemplates(ctx) {
+		if err != nil {
+			slog.Error("listing exercise templates", "error", err)
+			os.Exit(1)
+		}
+		titles[t.ID] = t.Title
+	}
+
+	plan := fivethreeone.NewSyncer(client, cfg).Plan()
+	fmt.Printf("Dry run — nothing sent to Hevy\nFolder: 5/3/1 (Cycle %d)\n", cfg.CycleNumber)
+	fmt.Printf("%d routine(s)\n", len(plan))
+
+	for _, planned := range plan {
+		r := planned.Request
+		fmt.Printf("\n%s\n", r.Title)
+		if r.Notes != "" {
+			fmt.Printf("  Notes: %s\n", r.Notes)
+		}
+		printRoutineExercises(routineExercisesFromRequest(r, titles), false)
+	}
+}
+
+// routineExercisesFromRequest converts a routine request into the shape Hevy returns it
+// in, so planned and synced routines share one printer. Titles come from the exercise
+// library; an ID missing from it is shown as itself.
+func routineExercisesFromRequest(r *hevy.RoutineRequest, titles map[string]string) []hevy.RoutineExercise {
+	exercises := make([]hevy.RoutineExercise, 0, len(r.Exercises))
+	for i := range r.Exercises {
+		e := &r.Exercises[i]
+		title, ok := titles[e.ExerciseTemplateID]
+		if !ok {
+			title = e.ExerciseTemplateID
+		}
+		sets := make([]hevy.RoutineSet, 0, len(e.Sets))
+		for j := range e.Sets {
+			s := &e.Sets[j]
+			var distance *float64
+			if s.DistanceMeters != nil {
+				d := float64(*s.DistanceMeters)
+				distance = &d
+			}
+			sets = append(sets, hevy.RoutineSet{
+				Type:            s.Type,
+				WeightKg:        s.WeightKg,
+				Reps:            s.Reps,
+				RepRange:        s.RepRange,
+				DurationSeconds: s.DurationSeconds,
+				DistanceMeters:  distance,
+				RPE:             s.RPE,
+				Index:           j,
+			})
+		}
+		exercises = append(exercises, hevy.RoutineExercise{
+			Title:              title,
+			ExerciseTemplateID: e.ExerciseTemplateID,
+			Notes:              e.Notes,
+			RestSeconds:        e.RestSeconds,
+			SupersetID:         e.SupersetID,
+			Sets:               sets,
+			Index:              i,
+		})
+	}
+	return exercises
 }
 
 func cmd531FixExercises(ctx context.Context, client *hevy.Client, args []string) {
@@ -808,7 +959,7 @@ func cmd531Status(args []string) {
 
 	for _, lift := range fivethreeone.AllLifts() {
 		lc, ok := cfg.Lifts[lift]
-		if !ok {
+		if !ok || lc.Disabled {
 			continue
 		}
 		assistance := cfg.AssistanceSchemeFor(lift)
@@ -830,7 +981,7 @@ func cmd531Status(args []string) {
 				fmt.Printf("    [%s] %.1f kg x%d%s\n", s.Type, s.WeightKg, s.Reps, amrap)
 			}
 			// Assistance sets are identical to one another, so print them as a count.
-			if as := fivethreeone.CalculateAssistanceSets(lift, assistance, lc.TrainingMaxKg, week, lc.UseLbs); len(as) > 0 {
+			if as := fivethreeone.CalculateAssistanceSetsWithCount(assistance, lc.TrainingMaxKg, week, lc.FSLSetsFor(lift, week), lc.UseLbs); len(as) > 0 {
 				label := strings.ToUpper(string(assistance))
 				if cue := assistance.Cue(); cue != "" {
 					label += ", " + cue

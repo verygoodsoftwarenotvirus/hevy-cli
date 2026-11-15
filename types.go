@@ -125,7 +125,7 @@ type Routine struct {
 
 type RoutineExercise struct {
 	RestSeconds        *int         `json:"rest_seconds"`
-	SupersetID         *int         `json:"supersets_id"`
+	SupersetID         *int         `json:"superset_id"`
 	Title              string       `json:"title"`
 	Notes              string       `json:"notes"`
 	ExerciseTemplateID string       `json:"exercise_template_id"`

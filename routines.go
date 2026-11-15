@@ -2,6 +2,8 @@ package hevy
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"net/http"
@@ -39,16 +41,15 @@ func (c *Client) CreateRoutine(ctx context.Context, req *RoutineRequest) (*Routi
 		Routine *RoutineRequest `json:"routine"`
 	}{Routine: req}
 
-	var resp struct {
-		Routine []Routine `json:"routine"`
-	}
+	var resp routineWriteResponse
 	if err := c.doJSON(ctx, http.MethodPost, "/v1/routines", body, &resp); err != nil {
 		return nil, fmt.Errorf("creating routine: %w", err)
 	}
-	if len(resp.Routine) == 0 {
-		return nil, fmt.Errorf("creating routine: empty response")
+	routine, err := resp.decode()
+	if err != nil {
+		return nil, fmt.Errorf("creating routine: %w", err)
 	}
-	return &resp.Routine[0], nil
+	return routine, nil
 }
 
 // UpdateRoutine updates an existing routine.
@@ -57,14 +58,38 @@ func (c *Client) UpdateRoutine(ctx context.Context, id string, req *RoutineReque
 		Routine *RoutineRequest `json:"routine"`
 	}{Routine: req}
 
-	var resp struct {
-		Routine []Routine `json:"routine"`
-	}
+	var resp routineWriteResponse
 	if err := c.doJSON(ctx, http.MethodPut, "/v1/routines/"+id, body, &resp); err != nil {
 		return nil, fmt.Errorf("updating routine %s: %w", id, err)
 	}
-	if len(resp.Routine) == 0 {
-		return nil, fmt.Errorf("updating routine %s: empty response", id)
+	routine, err := resp.decode()
+	if err != nil {
+		return nil, fmt.Errorf("updating routine %s: %w", id, err)
 	}
-	return &resp.Routine[0], nil
+	return routine, nil
+}
+
+// routineWriteResponse is the body Hevy answers a routine create or update with. Its
+// routine has come back both as a one-element array and as a bare object, so it is
+// decoded lazily to accept either.
+type routineWriteResponse struct {
+	Routine json.RawMessage `json:"routine"`
+}
+
+func (r *routineWriteResponse) decode() (*Routine, error) {
+	if len(r.Routine) == 0 || string(r.Routine) == "null" {
+		return nil, errors.New("empty response")
+	}
+	var list []Routine
+	if err := json.Unmarshal(r.Routine, &list); err == nil {
+		if len(list) == 0 {
+			return nil, errors.New("empty response")
+		}
+		return &list[0], nil
+	}
+	var routine Routine
+	if err := json.Unmarshal(r.Routine, &routine); err != nil {
+		return nil, fmt.Errorf("decoding routine: %w", err)
+	}
+	return &routine, nil
 }

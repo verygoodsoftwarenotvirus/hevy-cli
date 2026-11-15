@@ -120,12 +120,19 @@ func (a AssistanceScheme) DisplayName() string {
 // actually does. Used where the name accompanies a single lift's sets; DisplayName
 // remains the program-wide description.
 func (a AssistanceScheme) DisplayNameFor(lift Lift) string {
+	return a.DisplayNameForSets(lift.FSLSetCount())
+}
+
+// DisplayNameForSets is DisplayName with the FSL family's set count spelled out as
+// fslSets, for a week whose count comes from LiftConfig.FSLSetsByWeek. Presets other than
+// the FSL family ignore fslSets.
+func (a AssistanceScheme) DisplayNameForSets(fslSets int) string {
 	switch a {
 	case AssistanceFSL:
-		return fmt.Sprintf("First Set Last (%d×%d @ first working set)", lift.FSLSetCount(), fslReps)
+		return fmt.Sprintf("First Set Last (%d×%d @ first working set)", fslSets, fslReps)
 	case AssistanceFSLPaused:
 		return fmt.Sprintf("Paused First Set Last (%d×%d @ %d%% of FSL, %s)",
-			lift.FSLSetCount(), fslReps, int(pausedFSLFactor*100), a.Cue())
+			fslSets, fslReps, int(pausedFSLFactor*100), a.Cue())
 	default:
 		return a.DisplayName()
 	}
@@ -242,6 +249,13 @@ func CalculateRoutineSets(trainingMaxKg float64, week int, useLbs bool) []Calcul
 // the week is the reduced volume. The lift is needed because the FSL family varies its
 // set count by lift (see Lift.FSLSetCount).
 func CalculateAssistanceSets(lift Lift, scheme AssistanceScheme, trainingMaxKg float64, week int, useLbs bool) []CalculatedSet {
+	return CalculateAssistanceSetsWithCount(scheme, trainingMaxKg, week, lift.FSLSetCount(), useLbs)
+}
+
+// CalculateAssistanceSetsWithCount is CalculateAssistanceSets with the FSL family's set
+// count given directly, for lifts whose count varies by week (LiftConfig.FSLSetsFor).
+// fslSets is ignored by BBB, which always runs its fixed 5×10.
+func CalculateAssistanceSetsWithCount(scheme AssistanceScheme, trainingMaxKg float64, week, fslSets int, useLbs bool) []CalculatedSet {
 	weekScheme, ok := weekSchemes[week]
 	if !ok || week == DeloadWeek {
 		return nil
@@ -261,7 +275,7 @@ func CalculateAssistanceSets(lift Lift, scheme AssistanceScheme, trainingMaxKg f
 		// The FSL weight is the week's first working set, rounded exactly as that set
 		// is. The paused variant then scales that already-rounded weight, so it stays a
 		// visible fraction of the FSL number rather than drifting off the raw percentage.
-		count, reps = lift.FSLSetCount(), fslReps
+		count, reps = fslSets, fslReps
 		weight = round(trainingMaxKg * weekScheme.Sets[0].Percentage)
 		if scheme == AssistanceFSLPaused {
 			weight = round(weight * pausedFSLFactor)
@@ -269,6 +283,9 @@ func CalculateAssistanceSets(lift Lift, scheme AssistanceScheme, trainingMaxKg f
 	case AssistanceNone:
 		return nil
 	default:
+		return nil
+	}
+	if count < 1 {
 		return nil
 	}
 

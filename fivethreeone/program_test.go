@@ -259,3 +259,193 @@ func TestConfigAssistanceSchemeFor(T *testing.T) {
 		assert.Equal(t, AssistanceFSL, cleared.AssistanceSchemeFor(Squat))
 	})
 }
+
+// cycle7TrainingMaxes are the Cycle 7 training maxes (bench is disabled that cycle).
+var cycle7TrainingMaxes = map[Lift]float64{
+	Squat:         95.0,
+	OverheadPress: 50.0,
+	Deadlift:      135.0,
+}
+
+func TestCalculateRoutineSets_Cycle7TopSets(T *testing.T) {
+	T.Parallel()
+
+	table := []struct {
+		lift Lift
+		top  float64
+		week int
+	}{
+		{lift: Squat, week: 1, top: 80},
+		{lift: Squat, week: 2, top: 85},
+		{lift: Squat, week: 3, top: 90},
+		{lift: Deadlift, week: 1, top: 115},
+		{lift: Deadlift, week: 2, top: 122.5},
+		{lift: Deadlift, week: 3, top: 127.5},
+		{lift: OverheadPress, week: 1, top: 42.5},
+		{lift: OverheadPress, week: 2, top: 45},
+		{lift: OverheadPress, week: 3, top: 47.5},
+	}
+
+	for _, tc := range table {
+		T.Run(fmt.Sprintf("%s week %d", tc.lift, tc.week), func(t *testing.T) {
+			t.Parallel()
+
+			sets := CalculateRoutineSets(cycle7TrainingMaxes[tc.lift], tc.week, false)
+			require.NotEmpty(t, sets)
+
+			top := sets[len(sets)-1]
+			assert.True(t, top.IsAMRAP)
+			assert.Equal(t, tc.top, top.WeightKg)
+		})
+	}
+}
+
+// TestCalculateRoutineSets_Cycle7Golden pins every main-lift set for the Cycle 7 training
+// maxes, exactly as the code produced them before custom days, disabled lifts, and set
+// annotations were added. The comparison is exact (no delta): those changes must not
+// move a single main set.
+func TestCalculateRoutineSets_Cycle7Golden(T *testing.T) {
+	T.Parallel()
+
+	w := func(kg float64, reps int) CalculatedSet {
+		return CalculatedSet{Type: hevy.SetTypeWarmup, WeightKg: kg, Reps: reps}
+	}
+	n := func(kg float64, reps int) CalculatedSet {
+		return CalculatedSet{Type: hevy.SetTypeNormal, WeightKg: kg, Reps: reps}
+	}
+	amrap := func(kg float64, reps int) CalculatedSet {
+		return CalculatedSet{Type: hevy.SetTypeNormal, WeightKg: kg, Reps: reps, IsAMRAP: true}
+	}
+
+	// Indexed rather than ranged by value: see TestCalculateRoutineSets_Golden.
+	table := []struct {
+		lift     Lift
+		expected []CalculatedSet
+		week     int
+	}{
+		{lift: Squat, week: 1, expected: []CalculatedSet{w(37.5, 5), w(47.5, 5), w(57.5, 3), n(62.5, 5), n(72.5, 5), amrap(80, 5)}},
+		{lift: Squat, week: 2, expected: []CalculatedSet{w(37.5, 5), w(47.5, 5), w(57.5, 3), n(67.5, 3), n(75, 3), amrap(85, 3)}},
+		{lift: Squat, week: 3, expected: []CalculatedSet{w(37.5, 5), w(47.5, 5), w(57.5, 3), n(72.5, 5), n(80, 3), amrap(90, 1)}},
+		{lift: Squat, week: 4, expected: []CalculatedSet{n(37.5, 5), n(47.5, 5), n(57.5, 5)}},
+		{lift: Deadlift, week: 1, expected: []CalculatedSet{w(55, 5), w(67.5, 5), w(80, 3), n(87.5, 5), n(102.5, 5), amrap(115, 5)}},
+		{lift: Deadlift, week: 2, expected: []CalculatedSet{w(55, 5), w(67.5, 5), w(80, 3), n(95, 3), n(107.5, 3), amrap(122.5, 3)}},
+		{lift: Deadlift, week: 3, expected: []CalculatedSet{w(55, 5), w(67.5, 5), w(80, 3), n(102.5, 5), n(115, 3), amrap(127.5, 1)}},
+		{lift: Deadlift, week: 4, expected: []CalculatedSet{n(55, 5), n(67.5, 5), n(80, 5)}},
+		{lift: OverheadPress, week: 1, expected: []CalculatedSet{w(20, 5), w(25, 5), w(30, 3), n(32.5, 5), n(37.5, 5), amrap(42.5, 5)}},
+		{lift: OverheadPress, week: 2, expected: []CalculatedSet{w(20, 5), w(25, 5), w(30, 3), n(35, 3), n(40, 3), amrap(45, 3)}},
+		{lift: OverheadPress, week: 3, expected: []CalculatedSet{w(20, 5), w(25, 5), w(30, 3), n(37.5, 5), n(42.5, 3), amrap(47.5, 1)}},
+		{lift: OverheadPress, week: 4, expected: []CalculatedSet{n(20, 5), n(25, 5), n(30, 5)}},
+	}
+
+	for i := range table {
+		tc := &table[i]
+		T.Run(fmt.Sprintf("%s week %d", tc.lift, tc.week), func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.expected, CalculateRoutineSets(cycle7TrainingMaxes[tc.lift], tc.week, false))
+		})
+	}
+}
+
+func TestCalculateAssistanceSets_Cycle7(T *testing.T) {
+	T.Parallel()
+
+	table := []struct {
+		lift     Lift
+		scheme   AssistanceScheme
+		weightKg float64
+		sets     int
+		week     int
+	}{
+		// The deadlift's FSL stays capped at 3 sets.
+		{lift: Deadlift, scheme: AssistanceFSL, week: 1, sets: 3, weightKg: 87.5},
+		{lift: Deadlift, scheme: AssistanceFSL, week: 2, sets: 3, weightKg: 95},
+		{lift: Deadlift, scheme: AssistanceFSL, week: 3, sets: 3, weightKg: 102.5},
+		{lift: OverheadPress, scheme: AssistanceFSL, week: 1, sets: 5, weightKg: 32.5},
+		{lift: OverheadPress, scheme: AssistanceFSL, week: 2, sets: 5, weightKg: 35},
+		{lift: OverheadPress, scheme: AssistanceFSL, week: 3, sets: 5, weightKg: 37.5},
+		// Squat keeps its paused-FSL override. Week 1's 56.25 (90% of 62.5) is a
+		// rounding tie and goes up to 57.5.
+		{lift: Squat, scheme: AssistanceFSLPaused, week: 1, sets: 5, weightKg: 57.5},
+		{lift: Squat, scheme: AssistanceFSLPaused, week: 2, sets: 5, weightKg: 60},
+		{lift: Squat, scheme: AssistanceFSLPaused, week: 3, sets: 5, weightKg: 65},
+	}
+
+	for _, tc := range table {
+		T.Run(fmt.Sprintf("%s %s week %d", tc.lift, tc.scheme, tc.week), func(t *testing.T) {
+			t.Parallel()
+
+			sets := CalculateAssistanceSets(tc.lift, tc.scheme, cycle7TrainingMaxes[tc.lift], tc.week, false)
+			require.Len(t, sets, tc.sets)
+			for _, s := range sets {
+				assert.Equal(t, CalculatedSet{Type: hevy.SetTypeNormal, WeightKg: tc.weightKg, Reps: 5}, s)
+			}
+		})
+	}
+}
+
+func TestCalculateAssistanceSetsWithCount(T *testing.T) {
+	T.Parallel()
+
+	const trainingMax = 100.0
+
+	for name, tc := range map[string]struct {
+		scheme   AssistanceScheme
+		week     int
+		fslSets  int
+		sets     int
+		weightKg float64
+		reps     int
+	}{
+		"fsl uses the given count":            {scheme: AssistanceFSL, week: 2, fslSets: 4, sets: 4, weightKg: 70, reps: 5},
+		"fsl taper bottoms out":               {scheme: AssistanceFSL, week: 3, fslSets: 2, sets: 2, weightKg: 75, reps: 5},
+		"paused fsl uses the given count":     {scheme: AssistanceFSLPaused, week: 3, fslSets: 3, sets: 3, weightKg: 67.5, reps: 5},
+		"bbb ignores the fsl count":           {scheme: AssistanceBBB, week: 1, fslSets: 2, sets: 5, weightKg: 50, reps: 10},
+		"no fsl on the deload whatever count": {scheme: AssistanceFSL, week: DeloadWeek, fslSets: 5},
+		"a zero count prescribes nothing":     {scheme: AssistanceFSL, week: 1, fslSets: 0},
+		"a negative count prescribes nothing": {scheme: AssistanceFSL, week: 1, fslSets: -1},
+	} {
+		T.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			sets := CalculateAssistanceSetsWithCount(tc.scheme, trainingMax, tc.week, tc.fslSets, false)
+			require.Len(t, sets, tc.sets)
+			for _, s := range sets {
+				assert.Equal(t, CalculatedSet{Type: hevy.SetTypeNormal, WeightKg: tc.weightKg, Reps: tc.reps}, s)
+			}
+		})
+	}
+
+	T.Run("the per-lift form matches the lift's default count", func(t *testing.T) {
+		t.Parallel()
+
+		for _, lift := range AllLifts() {
+			assert.Equal(t,
+				CalculateAssistanceSetsWithCount(AssistanceFSL, trainingMax, 1, lift.FSLSetCount(), false),
+				CalculateAssistanceSets(lift, AssistanceFSL, trainingMax, 1, false),
+				lift)
+		}
+	})
+}
+
+func TestAssistanceSchemeDisplayNameForSets(T *testing.T) {
+	T.Parallel()
+
+	for name, tc := range map[string]struct {
+		scheme   AssistanceScheme
+		expected string
+		fslSets  int
+	}{
+		"fsl":                  {scheme: AssistanceFSL, fslSets: 4, expected: "First Set Last (4×5 @ first working set)"},
+		"paused fsl":           {scheme: AssistanceFSLPaused, fslSets: 3, expected: "Paused First Set Last (3×5 @ 90% of FSL, 2s pause at the bottom)"},
+		"bbb ignores count":    {scheme: AssistanceBBB, fslSets: 2, expected: "Boring But Big (5×10 @ 50% TM)"},
+		"none ignores count":   {scheme: AssistanceNone, fslSets: 2, expected: "None"},
+		"fsl default (5 sets)": {scheme: AssistanceFSL, fslSets: Squat.FSLSetCount(), expected: AssistanceFSL.DisplayNameFor(Squat)},
+	} {
+		T.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.expected, tc.scheme.DisplayNameForSets(tc.fslSets))
+		})
+	}
+}

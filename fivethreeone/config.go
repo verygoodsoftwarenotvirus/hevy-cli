@@ -97,9 +97,10 @@ func (l Lift) IsUpperBody() bool {
 	return l == BenchPress || l == OverheadPress
 }
 
-// FSLSetCount returns how many First Set Last supplemental sets this lift runs. The
-// deadlift is capped below the others: its FSL sets sit on top of a lift that already
-// taxes recovery hardest, so it takes fewer of them.
+// FSLSetCount returns how many First Set Last supplemental sets this lift runs by
+// default. The deadlift is capped below the others: its FSL sets sit on top of a lift
+// that already taxes recovery hardest, so it takes fewer of them. LiftConfig.FSLSetsByWeek
+// overrides it week by week.
 func (l Lift) FSLSetCount() int {
 	if l == Deadlift {
 		return fslDeadliftSetCount
@@ -117,19 +118,63 @@ func (l Lift) TMIncrementKg() float64 {
 	return 5.0
 }
 
+// kgPerLb is the international avoirdupois pound, used to convert weights configured in
+// pounds (weight_lb) to the kilograms Hevy's API takes.
+const kgPerLb = 0.45359237
+
 // AuxiliarySet prescribes one set of an auxiliary exercise, so a movement can ramp load
 // and reps across its sets instead of repeating one prescription. Empty fields fall back
-// to the parent AuxiliaryExercise's WeightKg, Reps, and DurationSeconds, which keeps a
-// scheme that only varies weight from having to restate the reps on every rung.
+// to the parent AuxiliaryExercise's weight, Reps, RepRangeEnd, and DurationSeconds,
+// which keeps a scheme that only varies weight from having to restate the reps on every
+// rung.
+//
+// The weight is given in either kilograms (WeightKg) or pounds (WeightLb), never both;
+// pounds are converted to kilograms, unrounded, when the routine is built, so a machine
+// loaded in pounds shows its exact pound figure in Hevy.
 type AuxiliarySet struct {
 	DurationSeconds *int     `json:"duration_seconds,omitempty"`
 	WeightKg        *float64 `json:"weight_kg,omitempty"`
+	WeightLb        *float64 `json:"weight_lb,omitempty"`
 	Reps            int      `json:"reps,omitempty"`
+	RepRangeEnd     int      `json:"rep_range_end,omitempty"`
+}
+
+// weightInKg returns the set's own weight in kilograms, whichever unit it was given in,
+// or nil when it has none.
+func (s *AuxiliarySet) weightInKg() *float64 {
+	return weightInKg(s.WeightKg, s.WeightLb)
+}
+
+// weightInKg resolves a kilogram/pound pair to kilograms, preferring kilograms.
+func weightInKg(kg, lb *float64) *float64 {
+	switch {
+	case kg != nil:
+		return kg
+	case lb != nil:
+		converted := *lb * kgPerLb
+		return &converted
+	default:
+		return nil
+	}
 }
 
 // AuxiliaryExercise describes a user-supplied accessory movement appended to a lift's
-// routine on every week (including deload). Either Reps or DurationSeconds should be set.
-// Weight, rest, and notes are optional.
+// routine on every week (including deload, unless SkipDeload is set). Either Reps or
+// DurationSeconds should be set. Weight, rest, and notes are optional; leaving the weight
+// out prescribes none, for work whose load is picked on the day.
+//
+// RepRangeEnd turns Reps into the bottom of a rep range (Reps 8, RepRangeEnd 10 is 8-10).
+//
+// WeightLb is WeightKg given in pounds, for equipment loaded in pounds; set one or the
+// other. The unit is per exercise (and per set, in a SetScheme).
+//
+// WarmupSets are logged as warmup-type sets ahead of the exercise's working sets. Unlike
+// SetScheme entries they inherit nothing from the exercise, so the working weight stays a
+// single value to edit.
+//
+// Superset groups the exercise with its neighbors: adjacent exercises in the same list
+// that share a Superset label are sent to Hevy as one superset. A label must cover at
+// least two exercises, all next to each other.
 //
 // SetScheme prescribes each set individually and, when present, replaces Sets/Reps/WeightKg
 // as the source of the exercise's sets. Use it for ramped accessories (ascending weight,
@@ -141,28 +186,47 @@ type AuxiliarySet struct {
 type AuxiliaryExercise struct {
 	DurationSeconds    *int                   `json:"duration_seconds,omitempty"`
 	WeightKg           *float64               `json:"weight_kg,omitempty"`
+	WeightLb           *float64               `json:"weight_lb,omitempty"`
 	RestSeconds        *int                   `json:"rest_seconds,omitempty"`
 	Name               string                 `json:"name,omitempty"`
 	Notes              string                 `json:"notes,omitempty"`
+	Superset           string                 `json:"superset,omitempty"`
 	ExerciseTemplateID string                 `json:"exercise_template_id"`
 	ExerciseType       hevy.ExerciseType      `json:"exercise_type,omitempty"`
 	EquipmentCategory  hevy.EquipmentCategory `json:"equipment_category,omitempty"`
 	MuscleGroup        hevy.MuscleGroup       `json:"muscle_group,omitempty"`
 	OtherMuscles       []hevy.MuscleGroup     `json:"other_muscles,omitempty"`
 	SetScheme          []AuxiliarySet         `json:"set_scheme,omitempty"`
+	WarmupSets         []AuxiliarySet         `json:"warmup_sets,omitempty"`
 	Sets               int                    `json:"sets"`
 	Reps               int                    `json:"reps,omitempty"`
+	RepRangeEnd        int                    `json:"rep_range_end,omitempty"`
+	// SkipDeload leaves the exercise out of the deload week's routine.
+	SkipDeload bool `json:"skip_deload,omitempty"`
 }
 
-// PrescribedSets returns the exercise's sets as a SetScheme, expanding the Sets/Reps/WeightKg
-// shorthand into one entry per set when no explicit scheme is configured. Callers that need
-// to reason about individual sets can then treat both spellings the same way.
+// InWeek reports whether the exercise belongs in the given week's routine.
+func (a *AuxiliaryExercise) InWeek(week int) bool {
+	return week != DeloadWeek || !a.SkipDeload
+}
+
+// PrescribedSets returns the exercise's working sets as a SetScheme, expanding the
+// Sets/Reps/WeightKg shorthand into one entry per set when no explicit scheme is
+// configured. Callers that need to reason about individual sets can then treat both
+// spellings the same way. Weights come back in kilograms only: a weight given in pounds
+// is converted, and WeightLb is left unset.
 func (a *AuxiliaryExercise) PrescribedSets() []AuxiliarySet {
+	exerciseKg := weightInKg(a.WeightKg, a.WeightLb)
 	if len(a.SetScheme) > 0 {
+		// Filled in on a copy, so the configured scheme keeps its own (possibly empty or
+		// pound) fields.
 		scheme := make([]AuxiliarySet, len(a.SetScheme))
-		for i, s := range a.SetScheme {
+		copy(scheme, a.SetScheme)
+		for i := range scheme {
+			s := &scheme[i]
+			s.WeightKg, s.WeightLb = s.weightInKg(), nil
 			if s.WeightKg == nil {
-				s.WeightKg = a.WeightKg
+				s.WeightKg = exerciseKg
 			}
 			if s.DurationSeconds == nil {
 				s.DurationSeconds = a.DurationSeconds
@@ -170,7 +234,9 @@ func (a *AuxiliaryExercise) PrescribedSets() []AuxiliarySet {
 			if s.Reps == 0 {
 				s.Reps = a.Reps
 			}
-			scheme[i] = s
+			if s.RepRangeEnd == 0 {
+				s.RepRangeEnd = a.RepRangeEnd
+			}
 		}
 		return scheme
 	}
@@ -179,11 +245,38 @@ func (a *AuxiliaryExercise) PrescribedSets() []AuxiliarySet {
 	for range a.Sets {
 		scheme = append(scheme, AuxiliarySet{
 			DurationSeconds: a.DurationSeconds,
-			WeightKg:        a.WeightKg,
+			WeightKg:        exerciseKg,
 			Reps:            a.Reps,
+			RepRangeEnd:     a.RepRangeEnd,
 		})
 	}
 	return scheme
+}
+
+// PrescribedWarmupSets returns the exercise's warmup sets with their weights in
+// kilograms. Each is used exactly as written, with no fallback to the exercise's fields.
+func (a *AuxiliaryExercise) PrescribedWarmupSets() []AuxiliarySet {
+	warmups := make([]AuxiliarySet, len(a.WarmupSets))
+	copy(warmups, a.WarmupSets)
+	for i := range warmups {
+		warmups[i].WeightKg, warmups[i].WeightLb = warmups[i].weightInKg(), nil
+	}
+	return warmups
+}
+
+// validate rejects an exercise that gives a weight in both units, on itself or any set.
+func (a *AuxiliaryExercise) validate() error {
+	if a.WeightKg != nil && a.WeightLb != nil {
+		return fmt.Errorf("%q: set weight_kg or weight_lb, not both", a.Name)
+	}
+	for _, group := range [][]AuxiliarySet{a.SetScheme, a.WarmupSets} {
+		for i := range group {
+			if group[i].WeightKg != nil && group[i].WeightLb != nil {
+				return fmt.Errorf("%q set %d: set weight_kg or weight_lb, not both", a.Name, i+1)
+			}
+		}
+	}
+	return nil
 }
 
 // LiftConfig holds the training max and exercise template IDs for one lift.
@@ -198,7 +291,16 @@ type LiftConfig struct {
 	// --lift=<lift>' and clear it with --clear. This is how a single lift runs something
 	// different (e.g. paused FSL on the squat while everything else runs plain FSL)
 	// without the program committing to it.
-	Assistance         AssistanceScheme    `json:"assistance,omitempty"`
+	Assistance AssistanceScheme `json:"assistance,omitempty"`
+	// AMRAPNote and AssistanceNote annotate the AMRAP set and the supplemental sets.
+	// Hevy's routine sets have no notes of their own, so both land in the notes of the
+	// exercise those sets are logged against, and only in weeks that have such sets.
+	AMRAPNote      string `json:"amrap_note,omitempty"`
+	AssistanceNote string `json:"assistance_note,omitempty"`
+	// FSLSetsByWeek sets how many First Set Last sets (plain or paused) the lift runs in
+	// each working week, keyed by week number (1-3), so the supplemental volume can taper
+	// across the cycle. A week left out uses Lift.FSLSetCount. BBB is unaffected.
+	FSLSetsByWeek      map[int]int         `json:"fsl_sets_by_week,omitempty"`
 	Warmup             []AuxiliaryExercise `json:"warmup,omitempty"`
 	AuxiliaryExercises []AuxiliaryExercise `json:"auxiliary_exercises,omitempty"`
 	Cooldown           []AuxiliaryExercise `json:"cooldown,omitempty"`
@@ -207,18 +309,182 @@ type LiftConfig struct {
 	// EmptyBarWarmup prepends an empty-barbell warmup set to the main lift's working
 	// sets. Enabled for the major lifts except the deadlift.
 	EmptyBarWarmup bool `json:"empty_bar_warmup,omitempty"`
+	// Disabled drops the lift from routine generation while keeping its training max,
+	// template IDs, and accessories in the config, so it can be switched back on later.
+	Disabled bool `json:"disabled,omitempty"`
+}
+
+// FSLSetsFor returns how many FSL sets lift runs in week: the configured FSLSetsByWeek
+// entry, or the lift's default when that week isn't configured.
+func (c *LiftConfig) FSLSetsFor(lift Lift, week int) int {
+	if n, ok := c.FSLSetsByWeek[week]; ok {
+		return n
+	}
+	return lift.FSLSetCount()
+}
+
+// validate rejects FSL set counts for weeks without FSL, or counts below one (use the
+// "none" assistance preset to drop supplemental work), and accessories with a weight in
+// both units.
+func (c *LiftConfig) validate() error {
+	for week, n := range c.FSLSetsByWeek {
+		if week < 1 || week >= DeloadWeek {
+			return fmt.Errorf("fsl_sets_by_week: week %d has no FSL sets (use weeks 1-%d)", week, DeloadWeek-1)
+		}
+		if n < 1 {
+			return fmt.Errorf("fsl_sets_by_week: week %d needs at least 1 set, got %d", week, n)
+		}
+	}
+	return validateAuxList(c.Warmup, c.AuxiliaryExercises, c.Cooldown)
+}
+
+// validateAuxList validates every exercise in the given lists, and each list's superset
+// labels.
+func validateAuxList(lists ...[]AuxiliaryExercise) error {
+	for _, list := range lists {
+		for i := range list {
+			if err := list[i].validate(); err != nil {
+				return err
+			}
+		}
+		if err := validateSupersets(list); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateSupersets rejects a superset label that covers only one exercise, or whose
+// exercises aren't all adjacent in the list.
+func validateSupersets(list []AuxiliaryExercise) error {
+	closed := make(map[string]bool)
+	for i := 0; i < len(list); {
+		label := list[i].Superset
+		j := i + 1
+		for j < len(list) && list[j].Superset == label {
+			j++
+		}
+		if label != "" {
+			switch {
+			case closed[label]:
+				return fmt.Errorf("superset %q: its exercises must be next to each other", label)
+			case j-i < 2:
+				return fmt.Errorf("superset %q: needs at least two exercises", label)
+			}
+			closed[label] = true
+		}
+		i = j
+	}
+	return nil
+}
+
+// Day is one workout of the training week: either a 5/3/1 main lift (Lift set) or a
+// custom day of fixed exercises (Name and Exercises set) that runs unchanged every week
+// of the cycle, apart from exercises marked SkipDeload. A custom day's Warmup precedes
+// its exercises; when empty, the program-wide Config.Warmup is used instead. Main-lift
+// days take their warmup from the lift's LiftConfig.Warmup, so Warmup must be empty there.
+type Day struct {
+	Lift      Lift                `json:"lift,omitempty"`
+	Name      string              `json:"name,omitempty"`
+	Warmup    []AuxiliaryExercise `json:"warmup,omitempty"`
+	Exercises []AuxiliaryExercise `json:"exercises,omitempty"`
+}
+
+// IsCustom reports whether the day is a custom day rather than a main-lift day.
+func (d *Day) IsCustom() bool {
+	return d.Lift == ""
+}
+
+// DisplayName returns the name the day's routines are titled with.
+func (d *Day) DisplayName() string {
+	if d.IsCustom() {
+		return d.Name
+	}
+	return d.Lift.DisplayName()
 }
 
 // Config holds the complete 5/3/1 program state.
 type Config struct {
 	Lifts      map[Lift]LiftConfig     `json:"lifts"`
 	RoutineIDs map[Lift]map[int]string `json:"routine_ids,omitempty"`
-	FolderID   *int                    `json:"folder_id,omitempty"`
+	// CustomRoutineIDs is RoutineIDs for custom days, keyed by the day's name.
+	CustomRoutineIDs map[string]map[int]string `json:"custom_routine_ids,omitempty"`
+	FolderID         *int                      `json:"folder_id,omitempty"`
 	// Assistance selects the supplemental-volume preset applied to every lift. An empty
 	// value means DefaultAssistanceScheme; switch presets with 'hevy 531 assistance'.
-	Assistance  AssistanceScheme    `json:"assistance,omitempty"`
-	Warmup      []AuxiliaryExercise `json:"warmup,omitempty"`
-	CycleNumber int                 `json:"cycle_number"`
+	Assistance AssistanceScheme    `json:"assistance,omitempty"`
+	Warmup     []AuxiliaryExercise `json:"warmup,omitempty"`
+	// Days orders the training week. Leaving it out means one day per configured lift,
+	// in AllLifts order. A disabled lift's day is skipped wherever it is listed, so
+	// re-enabling the lift puts it straight back in its slot.
+	Days        []Day `json:"days,omitempty"`
+	CycleNumber int   `json:"cycle_number"`
+}
+
+// TrainingDays returns the days routines are generated for, in order: Days (or one day
+// per lift when Days is empty), minus days for lifts that are disabled or not configured.
+func (c *Config) TrainingDays() []Day {
+	days := c.Days
+	if len(days) == 0 {
+		for _, lift := range AllLifts() {
+			days = append(days, Day{Lift: lift})
+		}
+	}
+
+	var active []Day
+	for i := range days {
+		if !days[i].IsCustom() {
+			liftCfg, ok := c.Lifts[days[i].Lift]
+			if !ok || liftCfg.Disabled {
+				continue
+			}
+		}
+		active = append(active, days[i])
+	}
+	return active
+}
+
+// validate rejects Days entries that would otherwise be silently skipped or produce an
+// untitled routine, and lift or exercise settings that can't be applied as written.
+func (c *Config) validate() error {
+	for _, lift := range AllLifts() {
+		liftCfg, ok := c.Lifts[lift]
+		if !ok {
+			continue
+		}
+		if err := liftCfg.validate(); err != nil {
+			return fmt.Errorf("%s: %w", lift.DisplayName(), err)
+		}
+	}
+	if err := validateAuxList(c.Warmup); err != nil {
+		return fmt.Errorf("global warmup: %w", err)
+	}
+
+	seen := make(map[string]bool)
+	for i := range c.Days {
+		day := &c.Days[i]
+		switch {
+		case day.Lift != "" && day.Name != "":
+			return fmt.Errorf("day %d: set either lift or name, not both", i+1)
+		case day.IsCustom() && day.Name == "":
+			return fmt.Errorf("day %d: a custom day needs a name", i+1)
+		case !day.IsCustom():
+			if _, ok := c.Lifts[day.Lift]; !ok {
+				return fmt.Errorf("day %d: lift %q is not in the config", i+1, day.Lift)
+			}
+			if len(day.Warmup) > 0 {
+				return fmt.Errorf("day %d: set %s's warmup under lifts, not on the day", i+1, day.Lift.DisplayName())
+			}
+		}
+		if seen[day.DisplayName()] {
+			return fmt.Errorf("day %d: %q is listed more than once", i+1, day.DisplayName())
+		}
+		seen[day.DisplayName()] = true
+		if err := validateAuxList(day.Warmup, day.Exercises); err != nil {
+			return fmt.Errorf("day %d: %w", i+1, err)
+		}
+	}
+	return nil
 }
 
 // AssistanceScheme returns the configured supplemental-volume preset, falling back to
@@ -248,6 +514,9 @@ func LoadConfig(path string) (*Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	if err := cfg.validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 	return &cfg, nil
 }
@@ -368,6 +637,15 @@ func RefreshExerciseTemplateIDs(ctx context.Context, client *hevy.Client, cfg *C
 		}
 
 		cfg.Lifts[lift] = liftCfg
+	}
+
+	for i := range cfg.Days {
+		if err := resolveAuxTemplates(ctx, client, cfg.Days[i].Warmup, cfg.Days[i].Name+" day warmup"); err != nil {
+			return err
+		}
+		if err := resolveAuxTemplates(ctx, client, cfg.Days[i].Exercises, cfg.Days[i].Name+" day"); err != nil {
+			return err
+		}
 	}
 
 	return resolveAuxTemplates(ctx, client, cfg.Warmup, "global warmup")
