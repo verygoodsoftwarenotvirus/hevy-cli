@@ -452,3 +452,83 @@ func TestAuxiliaryExerciseSupersetJSON(T *testing.T) {
 	require.NoError(T, err)
 	assert.NotContains(T, string(data), "superset", "an unlabeled exercise doesn't write the field")
 }
+
+func TestAuxiliaryExerciseValidate_DistanceAndPlaceholder(T *testing.T) {
+	T.Parallel()
+
+	for name, tc := range map[string]struct {
+		aux   AuxiliaryExercise
+		valid bool
+	}{
+		"a weighted distance":                {aux: AuxiliaryExercise{WeightLb: new(240.0), DistanceMeters: new(30), Sets: 3}, valid: true},
+		"a zero distance":                    {aux: AuxiliaryExercise{DistanceMeters: new(0), Sets: 3}},
+		"a negative distance in a scheme":    {aux: AuxiliaryExercise{SetScheme: []AuxiliarySet{{DistanceMeters: new(-5)}}}},
+		"a weight placeholder":               {aux: AuxiliaryExercise{WeightPlaceholder: "LEG_CURL_KG", Sets: 3, Reps: 10}, valid: true},
+		"a placeholder with weight_kg":       {aux: AuxiliaryExercise{WeightPlaceholder: "LEG_CURL_KG", WeightKg: new(40.0), Sets: 3, Reps: 10}},
+		"a placeholder with weight_lb":       {aux: AuxiliaryExercise{WeightPlaceholder: "NEXT_PIN", WeightLb: new(160.0), Sets: 3, Reps: 10}},
+		"a placeholder with a ramped scheme": {aux: AuxiliaryExercise{WeightPlaceholder: "TOP_SET", SetScheme: []AuxiliarySet{{WeightKg: new(20.0), Reps: 10}, {Reps: 8}}}, valid: true},
+	} {
+		T.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			err := tc.aux.validate()
+			if tc.valid {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+			}
+		})
+	}
+}
+
+func TestAuxiliaryExerciseDistanceAndPlaceholderJSON(T *testing.T) {
+	T.Parallel()
+
+	var carry AuxiliaryExercise
+	require.NoError(T, json.Unmarshal([]byte(`{"name":"Farmers Walk","weight_lb":240,"distance_meters":30,"sets":3}`), &carry))
+	require.NotNil(T, carry.DistanceMeters)
+	assert.Equal(T, 30, *carry.DistanceMeters)
+
+	var curl AuxiliaryExercise
+	require.NoError(T, json.Unmarshal([]byte(`{"name":"Seated Leg Curl (Machine)","weight_placeholder":"LEG_CURL_KG","sets":3,"reps":10}`), &curl))
+	assert.Equal(T, "LEG_CURL_KG", curl.WeightPlaceholder)
+	assert.Nil(T, curl.WeightKg)
+
+	data, err := json.Marshal(AuxiliaryExercise{Name: "Face Pull", Sets: 3})
+	require.NoError(T, err)
+	assert.NotContains(T, string(data), "distance_meters")
+	assert.NotContains(T, string(data), "weight_placeholder")
+}
+
+func TestConfigWeightPlaceholders(T *testing.T) {
+	T.Parallel()
+
+	open := AuxiliaryExercise{Name: "Seated Leg Curl (Machine)", WeightPlaceholder: "LEG_CURL_KG", Sets: 3, Reps: 10}
+	filled := AuxiliaryExercise{Name: "Face Pull", WeightKg: new(30.0), Sets: 3, Reps: 10}
+
+	for name, tc := range map[string]struct {
+		expected []WeightPlaceholder
+		cfg      Config
+	}{
+		"nothing open": {
+			cfg: Config{Lifts: map[Lift]LiftConfig{Squat: {AuxiliaryExercises: []AuxiliaryExercise{filled}}}},
+		},
+		"on a lift's accessories": {
+			cfg:      Config{Lifts: map[Lift]LiftConfig{Deadlift: {AuxiliaryExercises: []AuxiliaryExercise{filled, open}}}},
+			expected: []WeightPlaceholder{{Day: "Deadlift", Exercise: "Seated Leg Curl (Machine)", Placeholder: "LEG_CURL_KG"}},
+		},
+		"on a custom day": {
+			cfg:      Config{Days: []Day{{Name: "Bench", Exercises: []AuxiliaryExercise{open}}}},
+			expected: []WeightPlaceholder{{Day: "Bench", Exercise: "Seated Leg Curl (Machine)", Placeholder: "LEG_CURL_KG"}},
+		},
+		"a disabled lift's are not reported": {
+			cfg: Config{Lifts: map[Lift]LiftConfig{Deadlift: {Disabled: true, AuxiliaryExercises: []AuxiliaryExercise{open}}}},
+		},
+	} {
+		T.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.expected, tc.cfg.WeightPlaceholders())
+		})
+	}
+}

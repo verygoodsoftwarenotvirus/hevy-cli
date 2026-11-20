@@ -131,8 +131,12 @@ const kgPerLb = 0.45359237
 // The weight is given in either kilograms (WeightKg) or pounds (WeightLb), never both;
 // pounds are converted to kilograms, unrounded, when the routine is built, so a machine
 // loaded in pounds shows its exact pound figure in Hevy.
+//
+// DistanceMeters makes the set a carried or dragged distance rather than a rep count: it
+// is sent with its weight and distance and no reps. Hevy takes whole meters.
 type AuxiliarySet struct {
 	DurationSeconds *int     `json:"duration_seconds,omitempty"`
+	DistanceMeters  *int     `json:"distance_meters,omitempty"`
 	WeightKg        *float64 `json:"weight_kg,omitempty"`
 	WeightLb        *float64 `json:"weight_lb,omitempty"`
 	Reps            int      `json:"reps,omitempty"`
@@ -159,9 +163,16 @@ func weightInKg(kg, lb *float64) *float64 {
 }
 
 // AuxiliaryExercise describes a user-supplied accessory movement appended to a lift's
-// routine on every week (including deload, unless SkipDeload is set). Either Reps or
-// DurationSeconds should be set. Weight, rest, and notes are optional; leaving the weight
-// out prescribes none, for work whose load is picked on the day.
+// routine on every week (including deload, unless SkipDeload is set). One of Reps,
+// DurationSeconds, or DistanceMeters should be set. Weight, rest, and notes are optional;
+// leaving the weight out prescribes none, for work whose load is picked on the day.
+//
+// DistanceMeters prescribes each set as a distance (loaded carries, sled work) instead of
+// reps, for Hevy's weight-and-distance exercise types.
+//
+// WeightPlaceholder names a weight that hasn't been decided yet (e.g. "LEG_CURL_KG"). The
+// exercise is generated with no weight until the placeholder is replaced by weight_kg or
+// weight_lb; Config.WeightPlaceholders lists the ones still open.
 //
 // RepRangeEnd turns Reps into the bottom of a rep range (Reps 8, RepRangeEnd 10 is 8-10).
 //
@@ -185,9 +196,11 @@ func weightInKg(kg, lb *float64) *float64 {
 // creates a custom template using ExerciseType/EquipmentCategory/MuscleGroup/OtherMuscles.
 type AuxiliaryExercise struct {
 	DurationSeconds    *int                   `json:"duration_seconds,omitempty"`
+	DistanceMeters     *int                   `json:"distance_meters,omitempty"`
 	WeightKg           *float64               `json:"weight_kg,omitempty"`
 	WeightLb           *float64               `json:"weight_lb,omitempty"`
 	RestSeconds        *int                   `json:"rest_seconds,omitempty"`
+	WeightPlaceholder  string                 `json:"weight_placeholder,omitempty"`
 	Name               string                 `json:"name,omitempty"`
 	Notes              string                 `json:"notes,omitempty"`
 	Superset           string                 `json:"superset,omitempty"`
@@ -231,6 +244,9 @@ func (a *AuxiliaryExercise) PrescribedSets() []AuxiliarySet {
 			if s.DurationSeconds == nil {
 				s.DurationSeconds = a.DurationSeconds
 			}
+			if s.DistanceMeters == nil {
+				s.DistanceMeters = a.DistanceMeters
+			}
 			if s.Reps == 0 {
 				s.Reps = a.Reps
 			}
@@ -245,6 +261,7 @@ func (a *AuxiliaryExercise) PrescribedSets() []AuxiliarySet {
 	for range a.Sets {
 		scheme = append(scheme, AuxiliarySet{
 			DurationSeconds: a.DurationSeconds,
+			DistanceMeters:  a.DistanceMeters,
 			WeightKg:        exerciseKg,
 			Reps:            a.Reps,
 			RepRangeEnd:     a.RepRangeEnd,
@@ -264,15 +281,25 @@ func (a *AuxiliaryExercise) PrescribedWarmupSets() []AuxiliarySet {
 	return warmups
 }
 
-// validate rejects an exercise that gives a weight in both units, on itself or any set.
+// validate rejects an exercise that gives a weight in both units, on itself or any set, a
+// weight placeholder alongside the weight it stands in for, or a distance below one meter.
 func (a *AuxiliaryExercise) validate() error {
 	if a.WeightKg != nil && a.WeightLb != nil {
 		return fmt.Errorf("%q: set weight_kg or weight_lb, not both", a.Name)
+	}
+	if a.WeightPlaceholder != "" && (a.WeightKg != nil || a.WeightLb != nil) {
+		return fmt.Errorf("%q: weight_placeholder %q is still set alongside a weight; remove it", a.Name, a.WeightPlaceholder)
+	}
+	if a.DistanceMeters != nil && *a.DistanceMeters < 1 {
+		return fmt.Errorf("%q: distance_meters must be at least 1, got %d", a.Name, *a.DistanceMeters)
 	}
 	for _, group := range [][]AuxiliarySet{a.SetScheme, a.WarmupSets} {
 		for i := range group {
 			if group[i].WeightKg != nil && group[i].WeightLb != nil {
 				return fmt.Errorf("%q set %d: set weight_kg or weight_lb, not both", a.Name, i+1)
+			}
+			if d := group[i].DistanceMeters; d != nil && *d < 1 {
+				return fmt.Errorf("%q set %d: distance_meters must be at least 1, got %d", a.Name, i+1, *d)
 			}
 		}
 	}
@@ -442,6 +469,43 @@ func (c *Config) TrainingDays() []Day {
 		active = append(active, days[i])
 	}
 	return active
+}
+
+// WeightPlaceholder is one exercise whose weight is still a placeholder.
+type WeightPlaceholder struct {
+	// Day is the display name of the training day the exercise is on.
+	Day string
+	// Exercise is the exercise's configured name.
+	Exercise string
+	// Placeholder is the name the open weight was given in the config.
+	Placeholder string
+}
+
+// WeightPlaceholders lists every exercise on a training day whose weight is still a
+// placeholder, in routine order. Those exercises are generated with no weight.
+func (c *Config) WeightPlaceholders() []WeightPlaceholder {
+	var open []WeightPlaceholder
+	days := c.TrainingDays()
+	for i := range days {
+		day := &days[i]
+		lists := [][]AuxiliaryExercise{day.Warmup, day.Exercises}
+		if !day.IsCustom() {
+			liftCfg := c.Lifts[day.Lift]
+			lists = [][]AuxiliaryExercise{liftCfg.Warmup, liftCfg.AuxiliaryExercises, liftCfg.Cooldown}
+		}
+		for _, list := range lists {
+			for j := range list {
+				if list[j].WeightPlaceholder != "" {
+					open = append(open, WeightPlaceholder{
+						Day:         day.DisplayName(),
+						Exercise:    list[j].Name,
+						Placeholder: list[j].WeightPlaceholder,
+					})
+				}
+			}
+		}
+	}
+	return open
 }
 
 // validate rejects Days entries that would otherwise be silently skipped or produce an

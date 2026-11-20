@@ -325,6 +325,10 @@ func auxToExerciseRequest(aux AuxiliaryExercise) hevy.RoutineExerciseRequest {
 		p := &prescribed[i].set
 		rs := hevy.RoutineSetRequest{Type: prescribed[i].setType}
 		switch {
+		case p.DistanceMeters != nil:
+			// A carried distance has no rep count; the weight is added below.
+			d := *p.DistanceMeters
+			rs.DistanceMeters = &d
 		case p.DurationSeconds != nil:
 			d := *p.DurationSeconds
 			rs.DurationSeconds = &d

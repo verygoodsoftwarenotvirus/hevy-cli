@@ -815,6 +815,13 @@ func cmd531Sync(ctx context.Context, client *hevy.Client, args []string) {
 		os.Exit(1)
 	}
 
+	// Reported on stderr, so the plan printed on stdout keeps its layout.
+	placeholders := cfg.WeightPlaceholders()
+	for i := range placeholders {
+		p := &placeholders[i]
+		fmt.Fprintf(os.Stderr, "placeholder %s: %s — %s has no weight yet\n", p.Placeholder, p.Day, p.Exercise)
+	}
+
 	if *dryRun {
 		if *nextCycle {
 			cfg.CycleNumber++

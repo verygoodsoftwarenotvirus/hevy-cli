@@ -626,3 +626,56 @@ func TestAppendAuxRequests_Supersets(T *testing.T) {
 		})
 	}
 }
+
+func TestAuxToExerciseRequest_Distance(T *testing.T) {
+	T.Parallel()
+
+	// Converted at run time, as the code does (see TestAuxToExerciseRequest_WarmupSetsAndPounds).
+	pounds := func(lb float64) *float64 { kg := lb * kgPerLb; return &kg }
+
+	for name, tc := range map[string]struct {
+		weightKg *float64
+		meters   []int
+		aux      AuxiliaryExercise
+	}{
+		"a weighted carry repeats its distance on every set": {
+			aux:      AuxiliaryExercise{WeightKg: new(100.0), DistanceMeters: new(30), Sets: 3},
+			meters:   []int{30, 30, 30},
+			weightKg: new(100.0),
+		},
+		"a weight in pounds is converted": {
+			aux:      AuxiliaryExercise{WeightLb: new(70.0), DistanceMeters: new(30), Sets: 2},
+			meters:   []int{30, 30},
+			weightKg: pounds(70),
+		},
+		"an unweighted distance carries no weight": {
+			aux:    AuxiliaryExercise{DistanceMeters: new(20), Sets: 1},
+			meters: []int{20},
+		},
+		"a set scheme can vary the distance and falls back to the exercise's": {
+			aux: AuxiliaryExercise{
+				WeightKg:       new(100.0),
+				DistanceMeters: new(30),
+				SetScheme:      []AuxiliarySet{{}, {DistanceMeters: new(15)}},
+			},
+			meters:   []int{30, 15},
+			weightKg: new(100.0),
+		},
+	} {
+		T.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			req := auxToExerciseRequest(tc.aux)
+
+			require.Len(t, req.Sets, len(tc.meters))
+			for i, s := range req.Sets {
+				require.NotNil(t, s.DistanceMeters)
+				assert.Equal(t, tc.meters[i], *s.DistanceMeters)
+				assert.Equal(t, tc.weightKg, s.WeightKg)
+				assert.Nil(t, s.Reps, "a distance set has no rep count")
+				assert.Nil(t, s.RepRange)
+				assert.Nil(t, s.DurationSeconds)
+			}
+		})
+	}
+}

@@ -2,7 +2,6 @@ package fivethreeone
 
 import (
 	"fmt"
-	"slices"
 	"testing"
 
 	"github.com/verygoodsoftwarenotvirus/hevy-cli"
@@ -42,6 +41,14 @@ const (
 	cycle8ToeTouchID       = "toe-touches-id"
 	cycle8BarbellRDLID     = "romanian-deadlift-barbell-id"
 	cycle8PushUpID         = "push-up-id"
+	cycle8FarmersWalkID    = "farmers-walk-id"
+	cycle8SuitcaseCarryID  = "suitcase-carry-id"
+	cycle8BandOverheadID   = "banded-overhead-tricep-extension-id"
+	cycle8OverheadExtID    = "overhead-triceps-extension-cable-id"
+	cycle8LegCurlID        = "seated-leg-curl-id"
+	cycle8FarmersNote      = "120 lb per hand; 33 yd"
+	cycle8SuitcaseNote     = "33 yd per side"
+	cycle8CarryMeters      = 30
 	cycle8BenchNote        = "controlled descent, no bounce; stop if pain; bump 2.5 kg only after a fully pain-free week"
 	cycle8ReverseHyperNote = "controlled, 1s squeeze at top; RPE 8"
 	cycle8RPE8             = "RPE 8"
@@ -59,19 +66,21 @@ func cycle8Warmup(templateID string, reps int, notes string, weightKg *float64) 
 	return AuxiliaryExercise{ExerciseTemplateID: templateID, Notes: notes, WeightKg: weightKg, Sets: 1, Reps: reps}
 }
 
-// cycle8BandWarmup is the banded upper-body warm-up shared by the bench and OHP days.
-func cycle8BandWarmup() []AuxiliaryExercise {
+// cycle8BandWarmup is the banded upper-body warm-up of the bench and OHP days, which
+// differ only in their triceps movement.
+func cycle8BandWarmup(tricepsID string) []AuxiliaryExercise {
 	return []AuxiliaryExercise{
 		cycle8Warmup(cycle8PullApartID, 12, "", nil),
 		cycle8Warmup(cycle8BandFacePullID, 12, "", nil),
-		cycle8Warmup(cycle8BandPushdownID, 12, "", nil),
+		cycle8Warmup(tricepsID, 12, "", nil),
 	}
 }
 
 // cycle8Config mirrors the Cycle 8 program: paused FSL on the squat, a per-week FSL taper
 // on every lift, a fixed-weight bench day in place of the press day, a single-set warm-up
 // list per day (banded work on the upper-body days), accessories with an RPE note each
-// and supersets on every day, pound-loaded accessories, and no Log Clean.
+// and supersets on every day, pound-loaded accessories, loaded carries closing the bench
+// day, and no Log Clean.
 func cycle8Config() *Config {
 	return &Config{
 		CycleNumber: 8,
@@ -116,12 +125,12 @@ func cycle8Config() *Config {
 				TrainingMaxKg:      52.5,
 				EmptyBarWarmup:     true,
 				FSLSetsByWeek:      map[int]int{1: 5, 2: 4, 3: 3},
-				Warmup:             append(cycle8BandWarmup(), cycle8Warmup(cycle8DislocateID, 10, "", nil)),
+				Warmup:             append(cycle8BandWarmup(cycle8BandOverheadID), cycle8Warmup(cycle8DislocateID, 10, "", nil)),
 				AuxiliaryExercises: []AuxiliaryExercise{
 					{ExerciseTemplateID: cycle8FacePullID, Notes: cycle8RPE8, Superset: "A", WeightKg: new(31.75), Sets: 3, Reps: 10},
-					{ExerciseTemplateID: cycle8DBLateralID, Notes: cycle8RPE8, Superset: "A", WeightLb: new(20.0), Sets: 3, Reps: 12, RepRangeEnd: 15},
-					{ExerciseTemplateID: cycle8PushdownID, Notes: cycle8RPE8, Superset: "B", WeightKg: new(58.0), Sets: 3, Reps: 10},
-					{ExerciseTemplateID: cycle8DragCurlID, Notes: cycle8RPE8, Superset: "B", WeightKg: new(31.75), Sets: 3, Reps: 10},
+					{ExerciseTemplateID: cycle8DBLateralID, Notes: cycle8RPE8, Superset: "A", WeightLb: new(15.0), Sets: 3, Reps: 12, RepRangeEnd: 15},
+					{ExerciseTemplateID: cycle8OverheadExtID, Notes: cycle8RPE8, Superset: "B", WeightLb: new(100.0), Sets: 3, Reps: 10, RepRangeEnd: 12},
+					{ExerciseTemplateID: cycle8DragCurlID, Notes: cycle8RPE8, Superset: "B", WeightLb: new(75.0), Sets: 3, Reps: 10, RepRangeEnd: 12},
 				},
 			},
 			Deadlift: {
@@ -137,33 +146,22 @@ func cycle8Config() *Config {
 				},
 				AuxiliaryExercises: []AuxiliaryExercise{
 					{
-						Name:               "Belt Squat Romanian Deadlift",
-						ExerciseTemplateID: cycle8BeltSquatRDLID,
-						Notes:              "RPE 7-8",
-						WeightLb:           new(90.0),
+						Name:               "Seated Leg Curl (Machine)",
+						ExerciseTemplateID: cycle8LegCurlID,
+						Notes:              cycle8RPE8,
+						WeightLb:           new(200.0),
 						Sets:               3,
-						Reps:               8,
-						RepRangeEnd:        10,
+						Reps:               10,
+						RepRangeEnd:        12,
 					},
 					{ExerciseTemplateID: cycle8ChestRowID, Notes: cycle8RPE8, Superset: "A", Sets: 3, Reps: 10},
-					{
-						ExerciseTemplateID: cycle8RGPulldownID,
-						Notes:              cycle8RPE8,
-						Superset:           "A",
-						Sets:               4,
-						SetScheme: []AuxiliarySet{
-							{WeightKg: new(54.43), Reps: 15},
-							{WeightKg: new(63.5), Reps: 12},
-							{WeightKg: new(68.04), Reps: 10},
-							{WeightKg: new(72.57), Reps: 8},
-						},
-					},
+					{ExerciseTemplateID: cycle8RGPulldownID, Notes: cycle8RPE8, Superset: "A", WeightLb: new(130.0), Sets: 3, Reps: 10},
 				},
 			},
 		},
 		Days: []Day{
 			{Lift: Squat},
-			{Name: "Bench", Warmup: append(cycle8BandWarmup(), cycle8Warmup(cycle8PushUpID, 10, "slow on the way down.", nil)), Exercises: []AuxiliaryExercise{
+			{Name: "Bench", Warmup: append(cycle8BandWarmup(cycle8BandPushdownID), cycle8Warmup(cycle8PushUpID, 10, "slow on the way down.", nil)), Exercises: []AuxiliaryExercise{
 				{
 					Name:               "Bench Press (Barbell)",
 					ExerciseTemplateID: cycle8BenchID,
@@ -177,10 +175,11 @@ func cycle8Config() *Config {
 					},
 				},
 				{ExerciseTemplateID: cycle8InclineDBID, Notes: cycle8RPE8, Superset: "A", Sets: 3, Reps: 8, RepRangeEnd: 10},
-				{ExerciseTemplateID: cycle8CableRowID, Notes: cycle8RPE8, Superset: "A", Sets: 3, Reps: 10, RepRangeEnd: 12},
+				{ExerciseTemplateID: cycle8CableRowID, Notes: cycle8RPE8, Superset: "A", WeightLb: new(160.0), Sets: 3, Reps: 10, RepRangeEnd: 12},
 				{ExerciseTemplateID: cycle8PushdownID, Notes: cycle8RPE8, Superset: "B", Sets: 3, Reps: 10, RepRangeEnd: 15},
-				{ExerciseTemplateID: cycle8HammerCurlID, Notes: cycle8RPE8, Superset: "B", Sets: 3, Reps: 10, RepRangeEnd: 12},
-				{ExerciseTemplateID: cycle8CableCrunchID, Notes: cycle8RPE8, WeightLb: new(150.0), Sets: 3, Reps: 10},
+				{ExerciseTemplateID: cycle8HammerCurlID, Notes: cycle8RPE8, Superset: "B", WeightLb: new(35.0), Sets: 3, Reps: 10, RepRangeEnd: 12},
+				{ExerciseTemplateID: cycle8FarmersWalkID, Notes: cycle8FarmersNote, WeightLb: new(240.0), DistanceMeters: new(cycle8CarryMeters), Sets: 3},
+				{ExerciseTemplateID: cycle8SuitcaseCarryID, Notes: cycle8SuitcaseNote, WeightLb: new(70.0), DistanceMeters: new(cycle8CarryMeters), Sets: 2},
 			}},
 			{Lift: OverheadPress},
 			{Lift: Deadlift},
@@ -524,6 +523,15 @@ func cycle8Set(setType hevy.SetType, weightKg *float64, reps, rangeEnd int) hevy
 	return s
 }
 
+// cycle8Carries is n identical carry sets: a weight over a distance, with no rep count.
+func cycle8Carries(n int, weightKg *float64, meters int) []hevy.RoutineSetRequest {
+	sets := make([]hevy.RoutineSetRequest, 0, n)
+	for range n {
+		sets = append(sets, hevy.RoutineSetRequest{Type: hevy.SetTypeNormal, WeightKg: weightKg, DistanceMeters: &meters})
+	}
+	return sets
+}
+
 // cycle8Sets is n identical working sets.
 func cycle8Sets(n int, weightKg *float64, reps, rangeEnd int) []hevy.RoutineSetRequest {
 	sets := make([]hevy.RoutineSetRequest, 0, n)
@@ -551,12 +559,6 @@ func TestSyncerPlan_Cycle8Accessories(T *testing.T) {
 		cycle8Set(hevy.SetTypeNormal, pounds(215), 10, 0),
 		cycle8Set(hevy.SetTypeNormal, pounds(195), 12, 0),
 	}
-	reverseGripPyramid := []hevy.RoutineSetRequest{
-		cycle8Set(hevy.SetTypeNormal, new(54.43), 15, 0),
-		cycle8Set(hevy.SetTypeNormal, new(63.5), 12, 0),
-		cycle8Set(hevy.SetTypeNormal, new(68.04), 10, 0),
-		cycle8Set(hevy.SetTypeNormal, new(72.57), 8, 0),
-	}
 
 	// Everything after the day's main exercise (and its FSL), in order. Supersets are
 	// numbered from 0 within each routine; every accessory carries an RPE note.
@@ -580,10 +582,11 @@ func TestSyncerPlan_Cycle8Accessories(T *testing.T) {
 			mainID: cycle8BenchID,
 			accessories: []accessory{
 				{templateID: cycle8InclineDBID, notes: cycle8RPE8, superset: new(0), sets: cycle8Sets(3, nil, 8, 10)},
-				{templateID: cycle8CableRowID, notes: cycle8RPE8, superset: new(0), sets: cycle8Sets(3, nil, 10, 12)},
+				{templateID: cycle8CableRowID, notes: cycle8RPE8, superset: new(0), sets: cycle8Sets(3, pounds(160), 10, 12)},
 				{templateID: cycle8PushdownID, notes: cycle8RPE8, superset: new(1), sets: cycle8Sets(3, nil, 10, 15)},
-				{templateID: cycle8HammerCurlID, notes: cycle8RPE8, superset: new(1), sets: cycle8Sets(3, nil, 10, 12)},
-				{templateID: cycle8CableCrunchID, notes: cycle8RPE8, sets: cycle8Sets(3, pounds(150), 10, 0)},
+				{templateID: cycle8HammerCurlID, notes: cycle8RPE8, superset: new(1), sets: cycle8Sets(3, pounds(35), 10, 12)},
+				{templateID: cycle8FarmersWalkID, notes: cycle8FarmersNote, sets: cycle8Carries(3, pounds(240), cycle8CarryMeters)},
+				{templateID: cycle8SuitcaseCarryID, notes: cycle8SuitcaseNote, sets: cycle8Carries(2, pounds(70), cycle8CarryMeters)},
 			},
 		},
 		{
@@ -591,18 +594,18 @@ func TestSyncerPlan_Cycle8Accessories(T *testing.T) {
 			mainID: cycle8OHPID,
 			accessories: []accessory{
 				{templateID: cycle8FacePullID, notes: cycle8RPE8, superset: new(0), sets: cycle8Sets(3, new(31.75), 10, 0)},
-				{templateID: cycle8DBLateralID, notes: cycle8RPE8, superset: new(0), sets: cycle8Sets(3, pounds(20), 12, 15)},
-				{templateID: cycle8PushdownID, notes: cycle8RPE8, superset: new(1), sets: cycle8Sets(3, new(58.0), 10, 0)},
-				{templateID: cycle8DragCurlID, notes: cycle8RPE8, superset: new(1), sets: cycle8Sets(3, new(31.75), 10, 0)},
+				{templateID: cycle8DBLateralID, notes: cycle8RPE8, superset: new(0), sets: cycle8Sets(3, pounds(15), 12, 15)},
+				{templateID: cycle8OverheadExtID, notes: cycle8RPE8, superset: new(1), sets: cycle8Sets(3, pounds(100), 10, 12)},
+				{templateID: cycle8DragCurlID, notes: cycle8RPE8, superset: new(1), sets: cycle8Sets(3, pounds(75), 10, 12)},
 			},
 		},
 		{
 			day:    "Deadlift",
 			mainID: cycle8DeadliftID,
 			accessories: []accessory{
-				{templateID: cycle8BeltSquatRDLID, notes: "RPE 7-8", sets: cycle8Sets(3, pounds(90), 8, 10)},
+				{templateID: cycle8LegCurlID, notes: cycle8RPE8, sets: cycle8Sets(3, pounds(200), 10, 12)},
 				{templateID: cycle8ChestRowID, notes: cycle8RPE8, superset: new(0), sets: cycle8Sets(3, nil, 10, 0)},
-				{templateID: cycle8RGPulldownID, notes: cycle8RPE8, superset: new(0), sets: reverseGripPyramid},
+				{templateID: cycle8RGPulldownID, notes: cycle8RPE8, superset: new(0), sets: cycle8Sets(3, pounds(130), 10, 0)},
 			},
 		},
 	}
@@ -677,10 +680,12 @@ func TestSyncerPlan_Cycle8Warmups(T *testing.T) {
 		notes      string
 		reps       int
 	}
-	band := []warmup{
-		{templateID: cycle8PullApartID, reps: 12},
-		{templateID: cycle8BandFacePullID, reps: 12},
-		{templateID: cycle8BandPushdownID, reps: 12},
+	band := func(tricepsID string) []warmup {
+		return []warmup{
+			{templateID: cycle8PullApartID, reps: 12},
+			{templateID: cycle8BandFacePullID, reps: 12},
+			{templateID: tricepsID, reps: 12},
+		}
 	}
 
 	// Each day's warm-up exercises, in order, followed by the exercise they lead into.
@@ -701,12 +706,12 @@ func TestSyncerPlan_Cycle8Warmups(T *testing.T) {
 		{
 			day:    "Bench",
 			mainID: cycle8BenchID,
-			warmup: append(slices.Clone(band), warmup{templateID: cycle8PushUpID, notes: "slow on the way down.", reps: 10}),
+			warmup: append(band(cycle8BandPushdownID), warmup{templateID: cycle8PushUpID, notes: "slow on the way down.", reps: 10}),
 		},
 		{
 			day:    "Overhead Press",
 			mainID: cycle8OHPID,
-			warmup: append(slices.Clone(band), warmup{templateID: cycle8DislocateID, reps: 10}),
+			warmup: append(band(cycle8BandOverheadID), warmup{templateID: cycle8DislocateID, reps: 10}),
 		},
 		{
 			day:    "Deadlift",
@@ -752,4 +757,224 @@ func TestSyncerPlan_Cycle8Warmups(T *testing.T) {
 			assert.Equal(t, hevy.SetTypeNormal, main.Sets[3].Type, week)
 		}
 	})
+}
+
+// TestSyncerPlan_Cycle8AccessoryRoster pins which movements each day gained and lost in
+// the Cycle 8 accessory change, in every week of the cycle.
+func TestSyncerPlan_Cycle8AccessoryRoster(T *testing.T) {
+	T.Parallel()
+
+	byTitle := planByTitle(NewSyncer(nil, cycle8Config()).Plan())
+
+	table := []struct {
+		day     string
+		added   []string
+		removed []string
+	}{
+		{
+			day:     "Squat",
+			removed: []string{cycle8CableCrunchID, cycle8FarmersWalkID, cycle8SuitcaseCarryID, cycle8LegCurlID},
+		},
+		{
+			day:     "Bench",
+			added:   []string{cycle8FarmersWalkID, cycle8SuitcaseCarryID, cycle8BandPushdownID, cycle8PushdownID},
+			removed: []string{cycle8CableCrunchID, cycle8BandOverheadID, cycle8OverheadExtID},
+		},
+		{
+			day:     "Overhead Press",
+			added:   []string{cycle8BandOverheadID, cycle8OverheadExtID, cycle8DragCurlID},
+			removed: []string{cycle8BandPushdownID, cycle8PushdownID, cycle8FarmersWalkID, cycle8SuitcaseCarryID},
+		},
+		{
+			day:     "Deadlift",
+			added:   []string{cycle8LegCurlID, cycle8ChestRowID, cycle8RGPulldownID},
+			removed: []string{cycle8BeltSquatRDLID, cycle8FarmersWalkID, cycle8SuitcaseCarryID},
+		},
+	}
+
+	for _, tc := range table {
+		for week := 1; week <= DeloadWeek; week++ {
+			T.Run(fmt.Sprintf("%s week %d", tc.day, week), func(t *testing.T) {
+				t.Parallel()
+
+				req := byTitle[fmt.Sprintf("C8W%d -- %s", week, tc.day)]
+				require.NotNil(t, req)
+
+				counts := make(map[string]int)
+				for _, e := range req.Exercises {
+					counts[e.ExerciseTemplateID]++
+				}
+				for _, id := range tc.added {
+					assert.Equal(t, 1, counts[id], "%s should be on the day once", id)
+				}
+				for _, id := range tc.removed {
+					assert.Zero(t, counts[id], "%s should not be on the day", id)
+				}
+			})
+		}
+	}
+}
+
+// TestSyncerPlan_Cycle8Carries pins the loaded carries that close the bench day: a weight
+// over a distance on every set, no rep count, and no superset.
+func TestSyncerPlan_Cycle8Carries(T *testing.T) {
+	T.Parallel()
+
+	byTitle := planByTitle(NewSyncer(nil, cycle8Config()).Plan())
+
+	table := []struct {
+		templateID string
+		notes      string
+		printed    string
+		pounds     float64
+		sets       int
+	}{
+		{templateID: cycle8FarmersWalkID, notes: cycle8FarmersNote, sets: 3, pounds: 240, printed: "108.9"},
+		{templateID: cycle8SuitcaseCarryID, notes: cycle8SuitcaseNote, sets: 2, pounds: 70, printed: "31.8"},
+	}
+
+	for week := 1; week <= DeloadWeek; week++ {
+		req := byTitle[fmt.Sprintf("C8W%d -- Bench", week)]
+		require.NotNil(T, req)
+
+		for i, tc := range table {
+			T.Run(fmt.Sprintf("%s week %d", tc.templateID, week), func(t *testing.T) {
+				t.Parallel()
+
+				// The carries are the last two exercises, after the pushdown/curl superset.
+				idx, carry := exerciseByTemplate(t, req, tc.templateID)
+				assert.Equal(t, len(req.Exercises)-len(table)+i, idx)
+				curlIdx, curl := exerciseByTemplate(t, req, cycle8HammerCurlID)
+				assert.Less(t, curlIdx, idx)
+				require.NotNil(t, curl.SupersetID)
+
+				assert.Nil(t, carry.SupersetID)
+				assert.Equal(t, tc.notes, carry.Notes)
+				require.Len(t, carry.Sets, tc.sets)
+				for _, s := range carry.Sets {
+					assert.Equal(t, hevy.SetTypeNormal, s.Type)
+					require.NotNil(t, s.DistanceMeters)
+					assert.Equal(t, cycle8CarryMeters, *s.DistanceMeters)
+					require.NotNil(t, s.WeightKg)
+					assert.InDelta(t, tc.pounds, *s.WeightKg/kgPerLb, 1e-9)
+					assert.Equal(t, tc.printed, fmt.Sprintf("%.1f", *s.WeightKg))
+					assert.Nil(t, s.Reps)
+					assert.Nil(t, s.RepRange)
+					assert.Nil(t, s.DurationSeconds)
+				}
+			})
+		}
+	}
+}
+
+// cycle8ConfigWithOpenLegCurl is the Cycle 8 program as it stood before the leg curl's
+// starting weight was chosen: the weight is the LEG_CURL_KG placeholder.
+func cycle8ConfigWithOpenLegCurl() *Config {
+	cfg := cycle8Config()
+	curl := &cfg.Lifts[Deadlift].AuxiliaryExercises[0]
+	curl.WeightKg, curl.WeightLb, curl.WeightPlaceholder = nil, nil, "LEG_CURL_KG"
+	return cfg
+}
+
+// TestSyncerPlan_Cycle8LegCurlPlaceholder pins how the leg curl's weight goes from a
+// placeholder to a real one: while open it is reported by name and the exercise is
+// generated with reps but no weight; filled in, it is one config value.
+func TestSyncerPlan_Cycle8LegCurlPlaceholder(T *testing.T) {
+	T.Parallel()
+
+	pounds := func(lb float64) *float64 { kg := lb * kgPerLb; return &kg }
+
+	table := []struct {
+		cfg      *Config
+		weightKg *float64
+		name     string
+		printed  string
+		open     []WeightPlaceholder
+	}{
+		{
+			name:    "open",
+			cfg:     cycle8ConfigWithOpenLegCurl(),
+			open:    []WeightPlaceholder{{Day: "Deadlift", Exercise: "Seated Leg Curl (Machine)", Placeholder: "LEG_CURL_KG"}},
+			printed: "",
+		},
+		{
+			name:     "filled in",
+			cfg:      cycle8Config(),
+			weightKg: pounds(200),
+			printed:  "90.7",
+		},
+	}
+
+	for i := range table {
+		tc := &table[i]
+		require.NoError(T, tc.cfg.validate(), tc.name)
+		byTitle := planByTitle(NewSyncer(nil, tc.cfg).Plan())
+
+		T.Run(tc.name+": open weights", func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.open, tc.cfg.WeightPlaceholders())
+		})
+
+		for week := 1; week <= DeloadWeek; week++ {
+			T.Run(fmt.Sprintf("%s: week %d", tc.name, week), func(t *testing.T) {
+				t.Parallel()
+
+				req := byTitle[fmt.Sprintf("C8W%d -- Deadlift", week)]
+				require.NotNil(t, req)
+
+				// It takes the Belt Squat RDL's slot: first after the deadlift, on its own.
+				mainIdx, _ := exerciseByTemplate(t, req, cycle8DeadliftID)
+				curlIdx, curl := exerciseByTemplate(t, req, cycle8LegCurlID)
+				assert.Equal(t, mainIdx+1, curlIdx)
+				assert.Nil(t, curl.SupersetID)
+				assert.Equal(t, cycle8RPE8, curl.Notes)
+				assert.Equal(t, cycle8Sets(3, tc.weightKg, 10, 12), curl.Sets)
+				if tc.weightKg != nil {
+					assert.Equal(t, tc.printed, fmt.Sprintf("%.1f", *curl.Sets[0].WeightKg))
+				}
+			})
+		}
+	}
+
+	T.Run("a placeholder left beside a real weight is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		cfg := cycle8Config()
+		cfg.Lifts[Deadlift].AuxiliaryExercises[0].WeightPlaceholder = "LEG_CURL_KG"
+
+		assert.Error(t, cfg.validate())
+	})
+}
+
+// TestSyncerPlan_Cycle8ReverseGripPulldown pins the pulldown after its four-rung pyramid
+// was flattened: three sets of 10 at one weight, 130 lb, still paired with the row.
+func TestSyncerPlan_Cycle8ReverseGripPulldown(T *testing.T) {
+	T.Parallel()
+
+	byTitle := planByTitle(NewSyncer(nil, cycle8Config()).Plan())
+
+	for week := 1; week <= DeloadWeek; week++ {
+		T.Run(fmt.Sprintf("week %d", week), func(t *testing.T) {
+			t.Parallel()
+
+			req := byTitle[fmt.Sprintf("C8W%d -- Deadlift", week)]
+			require.NotNil(t, req)
+			_, row := exerciseByTemplate(t, req, cycle8ChestRowID)
+			_, pulldown := exerciseByTemplate(t, req, cycle8RGPulldownID)
+
+			require.NotNil(t, pulldown.SupersetID)
+			assert.Equal(t, row.SupersetID, pulldown.SupersetID)
+
+			require.Len(t, pulldown.Sets, 3)
+			for _, s := range pulldown.Sets {
+				require.NotNil(t, s.WeightKg)
+				require.NotNil(t, s.Reps)
+				assert.InDelta(t, 130.0, *s.WeightKg/kgPerLb, 1e-9)
+				assert.Equal(t, "59.0", fmt.Sprintf("%.1f", *s.WeightKg))
+				assert.Equal(t, 10, *s.Reps)
+				assert.Nil(t, s.RepRange)
+			}
+		})
+	}
 }
